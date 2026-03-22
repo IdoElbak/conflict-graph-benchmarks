@@ -10,8 +10,7 @@ const BucketSize uint32 = uint32((MaximumGraphSize + SizeOfUint64 - 1) / SizeOfU
 // maskActiveBit used in the AddEdge method that creates a mask to update the graph
 const maskActiveBit uint64 = 1
 
-// ConflictGraph purpose is to represent the conflict graphs created by the algorithms
-// Only intended to create one instance of this struct
+// ConflictGraph represents an undirected graph of transaction contentions using a space-efficient bit-matrix
 type ConflictGraph struct {
 	// graph is a flattened bit-matrix
 	// Each row of the adjacency matrix is stored sequentially using BucketSize uint64 buckets.
@@ -53,7 +52,8 @@ func (conflictGraph *ConflictGraph) Reset(currentBlockSize uint32) {
 // It only checks the memory range relevant to the currentBlockSize, ignoring any stale data in the pre-allocated buffer.
 func (conflictGraph *ConflictGraph) AreGraphsEqual(otherGraph *ConflictGraph, currentBlockSize uint32) bool {
 	var i uint32
-	for i = 0; i < currentBlockSize*BucketSize; i++ {
+	var limit = currentBlockSize * BucketSize
+	for i = 0; i < limit; i++ {
 		if conflictGraph.graph[i] != otherGraph.graph[i] {
 			return false
 		}

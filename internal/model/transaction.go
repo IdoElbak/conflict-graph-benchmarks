@@ -1,5 +1,6 @@
 package model
 
+// Transaction stores the ID and sorted access sets (Read/Write) for a single execution unit
 type Transaction struct {
 	ReadSet  []uint32 // Sorted
 	WriteSet []uint32 // Sorted
@@ -14,25 +15,57 @@ func (firstTransaction *Transaction) HasConflict(secondTransaction *Transaction)
 		return false
 	}
 
-	if hasOverlap(firstTransaction.WriteSet, secondTransaction.WriteSet) ||
-		hasOverlap(firstTransaction.WriteSet, secondTransaction.ReadSet) ||
-		hasOverlap(firstTransaction.ReadSet, secondTransaction.WriteSet) {
-		return true
-	}
-	return false
+	return hasOverlap(firstTransaction.ReadSet, secondTransaction.ReadSet, firstTransaction.WriteSet, secondTransaction.WriteSet)
 }
 
-func hasOverlap(set1, set2 []uint32) bool {
-	firstCounter, secondCounter := 0, 0
+// -################################################
+//    idea to use bitmasks for accessing lists.
+// -################################################
 
-	for firstCounter < len(set1) && secondCounter < len(set2) {
-		if set1[firstCounter] == set2[secondCounter] {
-			return true
-		} else if set1[firstCounter] < set2[secondCounter] {
-			firstCounter++
-		} else {
-			secondCounter++
+// hasOverlap is a private helper using both two-pointer and three-pointer approaches to find overlaps in the accesses lists
+func hasOverlap(firstReadSet, secondReadset, firstWriteSet, secondWriteSet []uint32) bool {
+	firstReadSetCounter, secondReadsetCounter := 0, 0
+	firstWriteSetCounter, secondWriteSetCounter := 0, 0
+
+	// checking for overlaps between firstWriteSet and either of secondReadset or secondWriteSet
+	for firstWriteSetCounter < len(firstWriteSet) {
+
+		for secondWriteSetCounter < len(secondWriteSet) &&
+			secondWriteSet[secondWriteSetCounter] < firstWriteSet[firstWriteSetCounter] {
+			secondWriteSetCounter++
 		}
+		if secondWriteSetCounter < len(secondWriteSet) &&
+			firstWriteSet[firstWriteSetCounter] == secondWriteSet[secondWriteSetCounter] {
+			return true
+		}
+
+		for secondReadsetCounter < len(secondReadset) &&
+			secondReadset[secondReadsetCounter] < firstWriteSet[firstWriteSetCounter] {
+			secondReadsetCounter++
+		}
+		if secondReadsetCounter < len(secondReadset) &&
+			firstWriteSet[firstWriteSetCounter] == secondReadset[secondReadsetCounter] {
+			return true
+		}
+
+		firstWriteSetCounter++
 	}
+
+	// checking for overlaps between secondWriteSet and firstReadSet
+	secondWriteSetCounter = 0
+	for secondWriteSetCounter < len(secondWriteSet) {
+
+		for firstReadSetCounter < len(firstReadSet) &&
+			firstReadSet[firstReadSetCounter] < secondWriteSet[secondWriteSetCounter] {
+			firstReadSetCounter++
+		}
+		if firstReadSetCounter < len(firstReadSet) &&
+			firstReadSet[firstReadSetCounter] == secondWriteSet[secondWriteSetCounter] {
+			return true
+		}
+		secondWriteSetCounter++
+	}
+
+	// no overlaps found
 	return false
 }
