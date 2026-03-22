@@ -1,0 +1,27 @@
+# Binary executables
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Specific test/scratchpad files
+Print_code.go
+
+# GoLand / JetBrains IDE files
+.idea/
+*.iws
+*.iml
+*.ipr
+
+# Output and temporary files
+*.test
+*.out
+*.prof
+obj/
+bin/
+
+# Operating System files
+Thumbs.db
+desktop.ini
+.DS_Store
