@@ -1,5 +1,9 @@
 package model
 
+import (
+	"sync/atomic"
+)
+
 // MaximumGraphSize is the assumed maximum number of transactions in a block of transactions
 const MaximumGraphSize uint32 = 3000
 const SizeOfUint64 uint32 = 64
@@ -33,13 +37,14 @@ func (conflictGraph *ConflictGraph) AddEdge(firstIndex uint32, secondIndex uint3
 	// Identify the specific bit within the 64-bit bucket using the remainder of the division by 64
 	bitOffset := secondIndex % SizeOfUint64
 
-	// Perform a bitwise OR to flip the specific bit to 1, marking a conflict without affecting other bits in the bucket
-	conflictGraph.graph[variableOffset] |= maskActiveBit << bitOffset
+	// Perform a safe bitwise OR to flip the specific bit to 1,
+	// marking a conflict without affecting other bits in the bucket
+	atomic.OrUint64(&conflictGraph.graph[variableOffset], maskActiveBit<<bitOffset)
 
 	// Repeat the process with indices swapped to maintain the undirected (symmetric) nature of the graph.
 	variableOffset = secondIndex*BucketSize + firstIndex/SizeOfUint64
 	bitOffset = firstIndex % SizeOfUint64
-	conflictGraph.graph[variableOffset] |= maskActiveBit << bitOffset
+	atomic.OrUint64(&conflictGraph.graph[variableOffset], maskActiveBit<<bitOffset)
 }
 
 // Reset used after each algorithm creates the graph inorder to reset all bits to 0 - no edges
