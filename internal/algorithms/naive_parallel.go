@@ -1,23 +1,29 @@
 package algorithms
 
-import "conflict-graph-benchmarks/internal/model"
+import (
+	"conflict-graph-benchmarks/internal/concurrency"
+	"conflict-graph-benchmarks/internal/model"
+)
 
-// NaiveParallel is the naive all-pair comparison parallel algorithm to build an undirected conflict graph
-// It passes only over the upper triangular part as there are no self-edges and AddEdge maintains symmetry
+// NaiveParallel implements an all-pairs conflict detection using a worker pool.
+// It leverages a central job channel to distribute rows of the upper triangular
 func NaiveParallel(block *model.Block, graph *model.ConflictGraph) {
 	var n = len(block.Transactions)
-	jobs := make(chan int, n)
 
-	for index := range jobs {
-		jobs <- index
-	}
+	concurrency.ParallelRun(n, func(jobQueue <-chan int) {
+		conflictWorker(block, graph, jobQueue)
+	})
 }
 
-func TxnConflictsRoutine(block *model.Block, graph *model.ConflictGraph, txnIndex uint32) {
+// conflictWorker is a long-running goroutine that drains the jobQueue
+// For every index 'i' received, it performs a conflict check against all 'j' > i
+func conflictWorker(block *model.Block, graph *model.ConflictGraph, jobQueue <-chan int) {
 	n := len(block.Transactions)
-	for i := txnIndex + 1; i < uint32(n); i++ {
-		if block.Transactions[txnIndex].HasConflict(&block.Transactions[i]) {
-			graph.AddEdge(txnIndex, i)
+	for i := range jobQueue {
+		for j := i + 1; j < n; j++ {
+			if block.Transactions[i].HasConflict(&block.Transactions[j]) {
+				graph.AddEdge(uint32(i), uint32(j))
+			}
 		}
 	}
 }

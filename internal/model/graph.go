@@ -65,3 +65,11 @@ func (conflictGraph *ConflictGraph) AreGraphsEqual(otherGraph *ConflictGraph, cu
 	}
 	return true
 }
+
+// AddRow update the row of edges in the graph for the transaction with index ID
+func (conflictGraph *ConflictGraph) AddRow(index uint32, row []uint64) {
+	rowIndex := index * BucketSize
+	for i := range BucketSize {
+		conflictGraph.graph[rowIndex+i] |= row[i]
+	}
+}
