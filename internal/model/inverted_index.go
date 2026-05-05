@@ -21,10 +21,10 @@ func NewInvertedIndex(block *Block) *ObjectInvertedIndex {
 func (invertedIndex *ObjectInvertedIndex) Insert(transactionID uint32, objectID uint32, write bool) {
 	// Calculate the offset in the flat slice by finding the start of the row (objectID * BucketSize)
 	// and adding the horizontal bucket index (transactionID / 64)
-	var variableOffset uint32 = objectID*BucketSize + transactionID/SizeOfUint64
+	var variableOffset = objectID*BucketSize + transactionID/SizeOfUint64
 
 	// Identify the specific bit within the 64-bit bucket using the remainder of the division by 64
-	bitOffset := transactionID % SizeOfUint64
+	var bitOffset = transactionID % SizeOfUint64
 
 	if write {
 		atomic.OrUint64(&invertedIndex.writeSet[variableOffset], maskActiveBit<<bitOffset)
