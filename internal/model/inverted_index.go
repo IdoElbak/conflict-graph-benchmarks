@@ -1,8 +1,6 @@
 package model
 
-import "sync/atomic"
-
-// ObjectInvertedIndex represents
+// ObjectInvertedIndex provides bitset-based tracking of read and write access for every unique object
 type ObjectInvertedIndex struct {
 	// readSet and writeSet are flattened bit-matrix
 	// Each row of the adjacency matrix is stored sequentially using BucketSize uint64 buckets.
@@ -10,7 +8,7 @@ type ObjectInvertedIndex struct {
 	writeSet []uint64
 }
 
-// NewInvertedIndex creates
+// NewInvertedIndex creates the ObjectInvertedIndex type and returns it
 func NewInvertedIndex(block *Block) *ObjectInvertedIndex {
 	sizeOfBitSet := block.numUniqueObjects * BucketSize
 	readSet := make([]uint64, sizeOfBitSet)
@@ -18,25 +16,28 @@ func NewInvertedIndex(block *Block) *ObjectInvertedIndex {
 	return &ObjectInvertedIndex{readSet: readSet, writeSet: writeSet}
 }
 
+// Insert records a transaction's access to an object using bitwise OR operations
 func (invertedIndex *ObjectInvertedIndex) Insert(transactionID uint32, objectID uint32, write bool) {
-	// Calculate the offset in the flat slice by finding the start of the row (objectID * BucketSize)
-	// and adding the horizontal bucket index (transactionID / 64)
+	// Calculate the offset in the slice by adding the bucket index where the object's access record starts
+	// to the bucket index in the object's row where the transaction is located
 	var variableOffset = objectID*BucketSize + transactionID/SizeOfUint64
 
 	// Identify the specific bit within the 64-bit bucket using the remainder of the division by 64
 	var bitOffset = transactionID % SizeOfUint64
 
 	if write {
-		atomic.OrUint64(&invertedIndex.writeSet[variableOffset], maskActiveBit<<bitOffset)
+		invertedIndex.writeSet[variableOffset] |= maskActiveBit << bitOffset
 	} else {
-		atomic.OrUint64(&invertedIndex.readSet[variableOffset], maskActiveBit<<bitOffset)
+		invertedIndex.readSet[variableOffset] |= maskActiveBit << bitOffset
 	}
 }
 
+// GetObjectReadSetBucket returns a slice view of the bitset representing all readers of an object
 func (invertedIndex *ObjectInvertedIndex) GetObjectReadSetBucket(objectID uint32) []uint64 {
 	return invertedIndex.readSet[objectID*BucketSize : (objectID+1)*BucketSize]
 }
 
+// GetObjectWriteSetBucket returns a slice view of the bitset representing all writers of an object
 func (invertedIndex *ObjectInvertedIndex) GetObjectWriteSetBucket(objectID uint32) []uint64 {
 	return invertedIndex.writeSet[objectID*BucketSize : (objectID+1)*BucketSize]
 }

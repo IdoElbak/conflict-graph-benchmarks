@@ -5,17 +5,17 @@ import (
 	"sync"
 )
 
-// Task is a function type that represents a single unit of work.
-// Any function that takes an int and returns nothing matches this type.
+// Task defines the signature for a worker function that consumes transaction indices from a channel
 type Task func(jobs <-chan int)
 
-func ParallelRun(count int, task Task) {
+// ParallelRun orchestrates a fixed-size worker pool to execute a task across all available logical cores
+func ParallelRun(totalTasks int, task Task) {
 	numWorkers := runtime.GOMAXPROCS(0) // possible improvement by *2 currentProcs
 	var waitGroup sync.WaitGroup
 
-	jobQueue := make(chan int, count)
+	jobQueue := make(chan int, totalTasks)
 
-	for index := range count {
+	for index := range totalTasks {
 		jobQueue <- index
 	}
 	close(jobQueue)

@@ -5,6 +5,7 @@ import (
 	"conflict-graph-benchmarks/internal/model"
 )
 
+// BitmapConstruction builds the conflict graph using an inverted index to perform bulk bitwise conflict detection
 func BitmapConstruction(block *model.Block, graph *model.ConflictGraph) {
 	invertedIndex := populateInvertedIndex(block)
 
@@ -15,6 +16,7 @@ func BitmapConstruction(block *model.Block, graph *model.ConflictGraph) {
 	})
 }
 
+// populateInvertedIndex constructs the mapping from objects to their respective transaction access bitsets
 func populateInvertedIndex(block *model.Block) *model.ObjectInvertedIndex {
 	invertedIndex := model.NewInvertedIndex(block)
 
@@ -31,10 +33,12 @@ func populateInvertedIndex(block *model.Block) *model.ObjectInvertedIndex {
 	return invertedIndex
 }
 
+// updateConflictsWorker aggregates object-level bitsets into a full transaction conflict vector
 func updateConflictsWorker(invertedIndex *model.ObjectInvertedIndex, block *model.Block, graph *model.ConflictGraph, jobQueue <-chan int) {
 	var conflictVector = make([]uint64, model.BucketSize)
 
 	for txnIdx := range jobQueue {
+		// Add W-R and W-W conflicts to the transaction's conflict-vector
 		for _, objectID := range block.Transactions[txnIdx].WriteSet {
 			objectWriters := invertedIndex.GetObjectWriteSetBucket(objectID)
 
@@ -49,6 +53,7 @@ func updateConflictsWorker(invertedIndex *model.ObjectInvertedIndex, block *mode
 			}
 		}
 
+		// Add R-W conflicts to the transaction's conflict-vector
 		for _, objectID := range block.Transactions[txnIdx].ReadSet {
 			objectWriters := invertedIndex.GetObjectWriteSetBucket(objectID)
 
@@ -58,14 +63,16 @@ func updateConflictsWorker(invertedIndex *model.ObjectInvertedIndex, block *mode
 		}
 
 		// Calculate the location of the transaction itself in its conflictVector
-		variableOffset := uint32(txnIdx) / model.SizeOfUint64
-		bitOffset := uint32(txnIdx) % model.SizeOfUint64
+		bucketOfTxnIdx := uint32(txnIdx) / model.SizeOfUint64
+		bitOfTxnIdx := uint32(txnIdx) % model.SizeOfUint64
 
-		// Removing the self conflict
-		conflictVector[variableOffset] &= ^(1 << bitOffset)
+		// Clear the self-conflict bit to ensure the transaction does not conflict with itself
+		conflictVector[bucketOfTxnIdx] &= ^(1 << bitOfTxnIdx)
 
+		// update the graph with the constructed conflict-vector
 		graph.AddRow(uint32(txnIdx), conflictVector)
 
+		// clear slice before moving to next task
 		clear(conflictVector)
 	}
 }
