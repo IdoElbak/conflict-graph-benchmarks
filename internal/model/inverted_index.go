@@ -10,25 +10,25 @@ type ObjectInvertedIndex struct {
 
 // NewInvertedIndex creates the ObjectInvertedIndex type and returns it
 func NewInvertedIndex(block *Block) *ObjectInvertedIndex {
-	sizeOfBitSet := block.numUniqueObjects * BucketSize
+	sizeOfBitSet := uint32(block.numUniqueObjects * BucketSize)
 	readSet := make([]uint64, sizeOfBitSet)
 	writeSet := make([]uint64, sizeOfBitSet)
 	return &ObjectInvertedIndex{readSet: readSet, writeSet: writeSet}
 }
 
 // Insert records a transaction's access to an object using bitwise OR operations
-func (invertedIndex *ObjectInvertedIndex) Insert(transactionID uint32, objectID uint32, write bool) {
+func (invertedIndex *ObjectInvertedIndex) Insert(txnIdx uint32, objID uint32, write bool) {
 	// Calculate the offset in the slice by adding the bucket index where the object's access record starts
 	// to the bucket index in the object's row where the transaction is located
-	var variableOffset = objectID*BucketSize + transactionID/SizeOfUint64
+	wordIdx := objID*BucketSize + txnIdx/SizeOfUint64
 
 	// Identify the specific bit within the 64-bit bucket using the remainder of the division by 64
-	var bitOffset = transactionID % SizeOfUint64
+	bitOffset := txnIdx % SizeOfUint64
 
 	if write {
-		invertedIndex.writeSet[variableOffset] |= maskActiveBit << bitOffset
+		invertedIndex.writeSet[wordIdx] |= maskActiveBit << bitOffset
 	} else {
-		invertedIndex.readSet[variableOffset] |= maskActiveBit << bitOffset
+		invertedIndex.readSet[wordIdx] |= maskActiveBit << bitOffset
 	}
 }
 

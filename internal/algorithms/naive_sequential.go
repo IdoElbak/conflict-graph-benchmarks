@@ -14,4 +14,7 @@ func NaiveSequential(block *model.Block, graph *model.ConflictGraph) {
 			}
 		}
 	}
+
+	// Execute symmetry pass to mirror the upper-triangular part of the graph to the lower
+	graph.SyncSymmetry(uint32(n))
 }

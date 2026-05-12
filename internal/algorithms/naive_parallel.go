@@ -13,6 +13,9 @@ func NaiveParallel(block *model.Block, graph *model.ConflictGraph) {
 	concurrency.ParallelRun(n, func(jobQueue <-chan int) {
 		conflictWorker(block, graph, jobQueue)
 	})
+
+	// Execute symmetry pass to mirror the upper-triangular part of the graph to the lower
+	graph.SyncSymmetry(uint32(n))
 }
 
 // conflictWorker is a long-running goroutine that drains the jobQueue
