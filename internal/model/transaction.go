@@ -4,18 +4,18 @@ package model
 type Transaction struct {
 	ReadSet  []uint32 // Sorted
 	WriteSet []uint32 // Sorted
-	ID       uint16
+	ID       uint32
 }
 
 // HasConflict determines if two transactions have a resource contention.
 // It returns true if there is a Write-After-Write, Write-After-Read, or Read-After-Write conflict.
-func (firstTransaction *Transaction) HasConflict(secondTransaction *Transaction) bool {
+func (firstTxn *Transaction) HasConflict(secondTxn *Transaction) bool {
 
-	if len(firstTransaction.WriteSet) == 0 && len(secondTransaction.WriteSet) == 0 {
+	if len(firstTxn.WriteSet) == 0 && len(secondTxn.WriteSet) == 0 {
 		return false
 	}
 
-	return hasOverlap(firstTransaction.ReadSet, secondTransaction.ReadSet, firstTransaction.WriteSet, secondTransaction.WriteSet)
+	return hasOverlap(firstTxn.ReadSet, secondTxn.ReadSet, firstTxn.WriteSet, secondTxn.WriteSet)
 }
 
 // -################################################

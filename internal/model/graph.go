@@ -20,10 +20,10 @@ func (conflictGraph *ConflictGraph) AddEdge(txnIdx, peerIdx uint32) {
 	wordIdx := txnIdx*BucketSize + peerIdx/SizeOfUint64
 
 	// Find the specific bit position within that word
-	bitOffset := peerIdx % SizeOfUint64
+	bitIdx := peerIdx % SizeOfUint64
 
 	// Mark the conflict in the upper triangle only
-	conflictGraph.graph[wordIdx] |= maskActiveBit << bitOffset
+	conflictGraph.graph[wordIdx] |= MaskActiveBit << bitIdx
 }
 
 // Reset used after each algorithm creates the graph inorder to reset all bits to 0 - no edges
@@ -73,9 +73,12 @@ func (conflictGraph *ConflictGraph) SyncSymmetry(blockSize uint32) {
 					break
 				}
 				if txnIdx < peerIdx {
+					// Calculate the position of mirrored edge
 					mirrorWordIdx := peerIdx*BucketSize + txnIdx/SizeOfUint64
 					mirrorBitIdx := txnIdx % SizeOfUint64
-					conflictGraph.graph[mirrorWordIdx] |= maskActiveBit << mirrorBitIdx
+
+					// Add mirrored edge to the graph
+					conflictGraph.graph[mirrorWordIdx] |= MaskActiveBit << mirrorBitIdx
 				}
 
 				activeBits &= activeBits - 1

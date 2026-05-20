@@ -9,7 +9,7 @@ import (
 func BitmapConstruction(block *model.Block, graph *model.ConflictGraph) {
 	invertedIndex := populateInvertedIndex(block)
 
-	var n = len(block.Transactions)
+	n := len(block.Transactions)
 
 	concurrency.ParallelRun(n, func(jobQueue <-chan int) {
 		updateConflictsWorker(invertedIndex, block, graph, jobQueue)
@@ -35,18 +35,18 @@ func populateInvertedIndex(block *model.Block) *model.ObjectInvertedIndex {
 
 // updateConflictsWorker aggregates object-level bitsets into a full transaction conflict vector
 func updateConflictsWorker(invertedIndex *model.ObjectInvertedIndex, block *model.Block, graph *model.ConflictGraph, jobQueue <-chan int) {
-	var conflictVector = make([]uint64, model.BucketSize)
+	conflictVector := make([]uint64, model.BucketSize)
 
 	for txnIdx := range jobQueue {
 		// Add W-R and W-W conflicts to the transaction's conflict-vector
-		for _, objectID := range block.Transactions[txnIdx].WriteSet {
-			objectWriters := invertedIndex.GetObjectWriteSetBucket(objectID)
+		for _, objID := range block.Transactions[txnIdx].WriteSet {
+			objectWriters := invertedIndex.GetObjectWriteSetBucket(objID)
 
 			for bucketIdx := range objectWriters {
 				conflictVector[bucketIdx] |= objectWriters[bucketIdx]
 			}
 
-			objectReaders := invertedIndex.GetObjectReadSetBucket(objectID)
+			objectReaders := invertedIndex.GetObjectReadSetBucket(objID)
 
 			for bucketIdx := range objectReaders {
 				conflictVector[bucketIdx] |= objectReaders[bucketIdx]
@@ -54,8 +54,8 @@ func updateConflictsWorker(invertedIndex *model.ObjectInvertedIndex, block *mode
 		}
 
 		// Add R-W conflicts to the transaction's conflict-vector
-		for _, objectID := range block.Transactions[txnIdx].ReadSet {
-			objectWriters := invertedIndex.GetObjectWriteSetBucket(objectID)
+		for _, objID := range block.Transactions[txnIdx].ReadSet {
+			objectWriters := invertedIndex.GetObjectWriteSetBucket(objID)
 
 			for bucketIdx := range objectWriters {
 				conflictVector[bucketIdx] |= objectWriters[bucketIdx]
@@ -63,11 +63,11 @@ func updateConflictsWorker(invertedIndex *model.ObjectInvertedIndex, block *mode
 		}
 
 		// Calculate the location of the transaction itself in its conflictVector
-		bucketOfTxnIdx := uint32(txnIdx) / model.SizeOfUint64
-		bitOfTxnIdx := uint32(txnIdx) % model.SizeOfUint64
+		wordIdx := uint32(txnIdx) / model.SizeOfUint64
+		bitIdx := uint32(txnIdx) % model.SizeOfUint64
 
 		// Clear the self-conflict bit to ensure the transaction does not conflict with itself
-		conflictVector[bucketOfTxnIdx] &= ^(1 << bitOfTxnIdx)
+		conflictVector[wordIdx] &= ^(model.MaskActiveBit << bitIdx)
 
 		// update the graph with the constructed conflict-vector
 		graph.AddRow(uint32(txnIdx), conflictVector)
