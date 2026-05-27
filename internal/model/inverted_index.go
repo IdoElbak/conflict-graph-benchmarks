@@ -10,7 +10,7 @@ type ObjectInvertedIndex struct {
 
 // NewInvertedIndex creates the ObjectInvertedIndex type and returns it
 func NewInvertedIndex(block *Block) *ObjectInvertedIndex {
-	sizeOfBitSet := uint32(block.numUniqueObjects * BucketSize)
+	sizeOfBitSet := uint32(block.NumUniqueObjects * BucketSize)
 	readSet := make([]uint64, sizeOfBitSet)
 	writeSet := make([]uint64, sizeOfBitSet)
 	return &ObjectInvertedIndex{readSet: readSet, writeSet: writeSet}

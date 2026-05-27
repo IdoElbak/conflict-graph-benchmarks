@@ -55,6 +55,8 @@ func (conflictGraph *ConflictGraph) AddRow(txnIdx uint32, row []uint64) {
 // SyncSymmetry reflects all upper-triangle conflicts to the lower triangle to complete the graph
 func (conflictGraph *ConflictGraph) SyncSymmetry(blockSize uint32) {
 	for txnIdx := uint32(0); txnIdx < blockSize; txnIdx++ {
+		mirrorTargetWordIdx := txnIdx / SizeOfUint64
+		mirrorTargetBitIdx := txnIdx % SizeOfUint64
 
 		// pass word by word in the bucket and ignore words with no conflicts recorded in them (word = 0)
 		for wordIdx := (txnIdx + 1) / SizeOfUint64; wordIdx < BucketSize; wordIdx++ {
@@ -74,11 +76,10 @@ func (conflictGraph *ConflictGraph) SyncSymmetry(blockSize uint32) {
 				}
 				if txnIdx < peerIdx {
 					// Calculate the position of mirrored edge
-					mirrorWordIdx := peerIdx*BucketSize + txnIdx/SizeOfUint64
-					mirrorBitIdx := txnIdx % SizeOfUint64
+					mirrorWordIdx := peerIdx*BucketSize + mirrorTargetWordIdx
 
 					// Add mirrored edge to the graph
-					conflictGraph.graph[mirrorWordIdx] |= MaskActiveBit << mirrorBitIdx
+					conflictGraph.graph[mirrorWordIdx] |= MaskActiveBit << mirrorTargetBitIdx
 				}
 
 				activeBits &= activeBits - 1
