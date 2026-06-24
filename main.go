@@ -1,70 +1,43 @@
 package main
 
 import (
+	"errors"
 	"fmt"
-	"io"
-	"io/fs"
+	"log"
 	"os"
-	"path/filepath"
-	"strings"
+
+	"conflict-graph-benchmarks/internal/digestion"
 )
 
-func main() {
-	// Create or overwrite the output file
-	outFile, err := os.Create("projects_code.txt")
-	if err != nil {
-		fmt.Println("Error creating file:", err)
-		return
-	}
-	defer outFile.Close()
+// runParsers iterates through a list of digestion functions and handles their execution state
+func runParsers(parsers []func() error) {
+	for i, parseFunc := range parsers {
+		fmt.Printf("Running parser %d/%d...\n", i+1, len(parsers))
 
-	// MultiWriter outputs to both the terminal and the file
-	out := io.MultiWriter(os.Stdout, outFile)
-
-	root := "."
-
-	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		err := parseFunc()
 		if err != nil {
-			return err
+			if errors.Is(err, os.ErrExist) {
+				fmt.Println(" -> Skipped: Cleaned file already exists.")
+				continue
+			}
+			log.Fatalf(" -> Fatal error during parsing: %v", err)
 		}
 
-		// Skip directories
-		if d.IsDir() {
-			return nil
-		}
-
-		// Skip this program itself
-		if d.Name() == "main.go" {
-			return nil
-		}
-
-		// Check for .go files
-		if strings.HasSuffix(d.Name(), ".go") {
-			printFile(path, out)
-		}
-
-		return nil
-	})
-
-	if err != nil {
-		fmt.Println("Error:", err)
+		fmt.Println(" -> Successfully parsed and cleaned data.")
 	}
 }
 
-func printFile(path string, out io.Writer) {
-	content, err := os.ReadFile(path)
-	if err != nil {
-		// Keep this one printing to standard error/console only
-		fmt.Printf("Could not read file %s: %v\n", path, err)
-		return
+func main() {
+	fmt.Println("=== Conflict Graph Benchmark Engine ===")
+	fmt.Println("Initializing Data Digestion Pipeline...")
+
+	// Register all blockchain-specific parsers here
+	pipeline := []func() error{
+		digestion.ParseEthereumStream,
+		digestion.ParseSolanaStream,
 	}
 
-	// Print separator
-	fmt.Fprintln(out, "--------------------------------------------------")
+	runParsers(pipeline)
 
-	// Print file path
-	fmt.Fprintf(out, "FILE: %s\n\n", path)
-
-	// Print content
-	fmt.Fprintln(out, string(content))
+	fmt.Println("Digestion complete. Data is ready for the BlockManager.")
 }

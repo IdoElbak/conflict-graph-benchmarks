@@ -9,6 +9,9 @@
 Print_code.go
 projects_code.txt
 
+# Gathered traces
+internal/digestion/data/
+
 # GoLand / JetBrains IDE files
 .idea/
 *.iws
