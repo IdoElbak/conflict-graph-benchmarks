@@ -1,43 +1,47 @@
 package main
 
 import (
-	"errors"
 	"fmt"
-	"log"
 	"os"
 
 	"conflict-graph-benchmarks/internal/digestion"
+	"conflict-graph-benchmarks/internal/model"
 )
-
-// runParsers iterates through a list of digestion functions and handles their execution state
-func runParsers(parsers []func() error) {
-	for i, parseFunc := range parsers {
-		fmt.Printf("Running parser %d/%d...\n", i+1, len(parsers))
-
-		err := parseFunc()
-		if err != nil {
-			if errors.Is(err, os.ErrExist) {
-				fmt.Println(" -> Skipped: Cleaned file already exists.")
-				continue
-			}
-			log.Fatalf(" -> Fatal error during parsing: %v", err)
-		}
-
-		fmt.Println(" -> Successfully parsed and cleaned data.")
-	}
-}
 
 func main() {
 	fmt.Println("=== Conflict Graph Benchmark Engine ===")
-	fmt.Println("Initializing Data Digestion Pipeline...")
 
-	// Register all blockchain-specific parsers here
+	// 1. Skip if results already exist
+	if _, err := os.Stat("benchmark_results.json"); err == nil {
+		fmt.Println("\n[Skipped] benchmark_results.json already exists. Remove it to run a new benchmark.")
+		return
+	}
+
+	// Phase 1: Data Digestion
+	fmt.Println("\n[Phase 1] Initializing Data Digestion Pipeline...")
+	runDigestionPhase()
+
+	// Phase 2 & 3: Stream, Translate, and Execute
+	fmt.Println("\n[Phase 2 & 3] Streaming Blocks and Executing Algorithms...")
+	manager := model.NewManager()
+	var allMetrics []BlockMetrics
+
+	// Define specific file paths
+	ethFile := "internal/digestion/data/Eth_cleaned_blocks_21297000_21297999.json"
+	solFile := "internal/digestion/data/Solana_cleaned_blocks_391000000_391000998.json"
+
+	processFile(ethFile, "Ethereum", manager, &allMetrics, 1000)
+	processFile(solFile, "Solana", manager, &allMetrics, 100)
+
+	// Phase 4: Analysis Export
+	fmt.Println("\n[Phase 4] Exporting Analysis Metrics...")
+	saveMetrics(allMetrics, "benchmark_results.json")
+}
+
+func runDigestionPhase() {
 	pipeline := []func() error{
 		digestion.ParseEthereumStream,
 		digestion.ParseSolanaStream,
 	}
-
 	runParsers(pipeline)
-
-	fmt.Println("Digestion complete. Data is ready for the BlockManager.")
 }

@@ -23,8 +23,10 @@ func populateIDBucket(block *model.Block) *model.ObjectIdBucket {
 	bucket := model.NewIdBucket(block.NumUniqueObjects)
 	n := len(block.Transactions)
 
-	// Pre-allocates exact read and write slices capacities for each object
-	preallocateBucketCapacity(bucket, block)
+	counts := countObjectAccesses(block)
+	for objID := uint32(0); objID < block.NumUniqueObjects; objID++ {
+		bucket.Preallocate(objID, counts[objID].reads, counts[objID].writes)
+	}
 
 	for txnIdx := 0; txnIdx < n; txnIdx++ {
 		for _, objID := range block.Transactions[txnIdx].WriteSet {
@@ -36,15 +38,6 @@ func populateIDBucket(block *model.Block) *model.ObjectIdBucket {
 	}
 
 	return bucket
-}
-
-// preallocateBucketCapacity reserves the exact slice capacities for every object's read and write sets
-func preallocateBucketCapacity(bucket *model.ObjectIdBucket, block *model.Block) {
-	counts := countObjectAccesses(block)
-
-	for objID := uint32(0); objID < block.NumUniqueObjects; objID++ {
-		bucket.Preallocate(objID, counts[objID].reads, counts[objID].writes)
-	}
 }
 
 // countObjectAccesses performs a single pass over all transactions to tally the exact number of readers and writers per object

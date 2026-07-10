@@ -6,7 +6,7 @@ import (
 )
 
 // IslandConstructionNaive builds the graph using pure Union-Find partitioning
-func IslandConstructionNaive(block *model.Block, graph *model.ConflictGraph) {
+func IslandConstructionNaive(block *model.Block, graph *model.ConflictGraph) (int, int, float64) {
 	n := uint32(len(block.Transactions))
 	bucket := populateIDBucket(block)
 	uf := model.NewUnionFind(n)
@@ -20,5 +20,5 @@ func IslandConstructionNaive(block *model.Block, graph *model.ConflictGraph) {
 		}
 	})
 
-	graph.SyncSymmetry(n)
+	return CalculateIslandStats(islands)
 }

@@ -49,3 +49,22 @@ func (unionFind *UnionFind) Union(txnIdx1, txnIdx2 uint32) {
 		unionFind.size[root2] += size1
 	}
 }
+
+// WrapUnionFind constructs a UnionFind over externally-owned slices
+func WrapUnionFind(parent, size []uint32) *UnionFind {
+	return &UnionFind{parent: parent, size: size}
+}
+
+// Reset reinitializes the forest to n singleton trees in place
+func (unionFind *UnionFind) Reset(n uint32) {
+	for i := range n {
+		unionFind.parent[i] = uint32(i)
+		unionFind.size[i] = 1
+	}
+}
+
+// Grow resizes the backing arrays to fit n elements, reallocating only when n exceeds current capacity
+func (unionFind *UnionFind) Grow(n uint32) {
+	unionFind.parent = growU32(unionFind.parent, int(n))
+	unionFind.size = growU32(unionFind.size, int(n))
+}

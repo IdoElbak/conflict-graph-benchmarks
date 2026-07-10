@@ -29,3 +29,4 @@ bin/
 Thumbs.db
 desktop.ini
 .DS_Store
+benchmark_results.json

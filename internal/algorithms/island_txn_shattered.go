@@ -5,10 +5,10 @@ import (
 	"conflict-graph-benchmarks/internal/model"
 )
 
-const TxnHubThreshold int = 100
+const TxnHubThreshold int = 50
 
 // IslandConstructionTxnShattered isolates massive transactions from the Union-Find phase
-func IslandConstructionTxnShattered(block *model.Block, graph *model.ConflictGraph) {
+func IslandConstructionTxnShattered(block *model.Block, graph *model.ConflictGraph) (int, int, float64) {
 	n := uint32(len(block.Transactions))
 
 	// Detect Hub Transactions
@@ -40,11 +40,12 @@ func IslandConstructionTxnShattered(block *model.Block, graph *model.ConflictGra
 	// Safely Reintegrate Hub Transactions via Row Ownership
 	concurrency.ParallelRun(int(n), func(jobQueue <-chan int) {
 		for txnIdx := range jobQueue {
-			reintegrateTxnRow(uint32(txnIdx), hubTxnsList, block, graph)
+			reintegrateTxnRow(uint32(txnIdx), isHubTxn, hubTxnsList, block, graph)
 		}
 	})
 
 	graph.SyncSymmetry(n)
+	return CalculateIslandStats(islands)
 }
 
 // populateIDBucketWithoutHubs builds object access bucket while ignoring "hub transactions"
@@ -70,13 +71,24 @@ func populateIDBucketWithoutHubs(block *model.Block, isHubTxn []bool) *model.Obj
 	return bucket
 }
 
-// reintegrateTxnRow executes a pairwise check per transaction
-func reintegrateTxnRow(txnIdx uint32, hubTxnsList []uint32, block *model.Block, graph *model.ConflictGraph) {
-	for _, hubIdx := range hubTxnsList {
-		// Only check the edge if current thread owns the upper-triangle row
-		if txnIdx < hubIdx {
-			if block.Transactions[txnIdx].HasConflict(&block.Transactions[hubIdx]) {
-				graph.AddEdge(txnIdx, hubIdx)
+// reintegrateTxnRow executes a pairwise check per transaction, maintaining strict row ownership
+func reintegrateTxnRow(txnIdx uint32, isHubTxn []bool, hubTxnsList []uint32, block *model.Block, graph *model.ConflictGraph) {
+	n := uint32(len(block.Transactions))
+
+	if isHubTxn[txnIdx] {
+		// Must check against all transactions > txnIdx
+		for peerIdx := txnIdx + 1; peerIdx < n; peerIdx++ {
+			if block.Transactions[txnIdx].HasConflict(&block.Transactions[peerIdx]) {
+				graph.AddEdge(txnIdx, peerIdx)
+			}
+		}
+	} else {
+		// Only need to check against Hubs > txnIdx
+		for _, hubIdx := range hubTxnsList {
+			if txnIdx < hubIdx {
+				if block.Transactions[txnIdx].HasConflict(&block.Transactions[hubIdx]) {
+					graph.AddEdge(txnIdx, hubIdx)
+				}
 			}
 		}
 	}

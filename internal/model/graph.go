@@ -26,6 +26,13 @@ func (conflictGraph *ConflictGraph) AddEdge(txnIdx, peerIdx uint32) {
 	conflictGraph.graph[wordIdx] |= MaskActiveBit << bitIdx
 }
 
+// IsEdge checks if a specific edge exists in the matrix
+func (conflictGraph *ConflictGraph) IsEdge(txnIdx, peerIdx uint32) bool {
+	wordIdx := txnIdx*BucketSize + peerIdx/SizeOfUint64
+	bitIdx := peerIdx % SizeOfUint64
+	return (conflictGraph.graph[wordIdx] & (MaskActiveBit << bitIdx)) != 0
+}
+
 // Reset used after each algorithm creates the graph inorder to reset all bits to 0 - no edges
 // currentBlockSize is the number of Txn in the current used block - used to only reset the relevant amount of variables
 func (conflictGraph *ConflictGraph) Reset(currentBlockSize uint32) {
@@ -87,4 +94,25 @@ func (conflictGraph *ConflictGraph) SyncSymmetry(blockSize uint32) {
 			}
 		}
 	}
+}
+
+// CountEdges returns the total number of unique undirected edges in the symmetric graph
+func (conflictGraph *ConflictGraph) CountEdges(blockSize uint32) uint32 {
+	var totalBits uint32 = 0
+	limit := blockSize * BucketSize
+
+	for i := uint32(0); i < limit; i++ {
+		totalBits += uint32(bits.OnesCount64(conflictGraph.graph[i]))
+	}
+
+	// Because SyncSymmetry mirrored the graph, every edge is counted twice (A->B and B->A).
+	return totalBits / 2
+}
+
+// Export returns a copy of the active portion of the graph for analysis serialization
+func (conflictGraph *ConflictGraph) Export(currentBlockSize uint32) []uint64 {
+	limit := currentBlockSize * BucketSize
+	out := make([]uint64, limit)
+	copy(out, conflictGraph.graph[:limit])
+	return out
 }

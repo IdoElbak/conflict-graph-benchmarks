@@ -6,71 +6,125 @@ import (
 )
 
 const ObjectHubThreshold uint32 = 50
+const LargeIslandThreshold = 32
 
 // IslandConstructionObjectShattered removes highly contested objects from the Union-Find phase
-func IslandConstructionObjectShattered(block *model.Block, graph *model.ConflictGraph) {
+func IslandConstructionObjectShattered(block *model.Block, graph *model.ConflictGraph) (int, int, float64) {
 	n := uint32(len(block.Transactions))
 
-	// Detect Hub Objects
+	// Build Inverted Index & Counts simultaneously
+	invertedIndex, counts := buildMasterIndex(block)
+
+	// Scan to detect Hub Objects and count accesses
 	isHubObject := make([]bool, block.NumUniqueObjects)
-	counts := countObjectAccesses(block)
+	var numHubs int
+
 	for objID := uint32(0); objID < block.NumUniqueObjects; objID++ {
 		if counts[objID].reads+counts[objID].writes > ObjectHubThreshold {
 			isHubObject[objID] = true
+			numHubs++
 		}
 	}
 
-	// Isolate & Group
-	bucket := populateIDBucket(block)
 	uf := model.NewUnionFind(n)
-	partitionViaStarTopology(block.NumUniqueObjects, bucket, uf, isHubObject)
+	partitionViaInvertedIndex(block.NumUniqueObjects, invertedIndex, uf, isHubObject)
 	islands := groupValidIslands(n, uf)
 
-	// Process Disjoint Islands
+	// Process islands via adaptive threshold (Pairwise-naive vs Bitwise Sweep)
 	concurrency.ParallelRun(len(islands), func(jobQueue <-chan int) {
+		// Allocated once per worker thread
+		conflictVector := make([]uint64, model.BucketSize)
+
 		for islandIdx := range jobQueue {
-			processSingleIsland(islands[islandIdx], block, graph)
+			island := islands[islandIdx]
+			if len(island) >= LargeIslandThreshold {
+				processLargeIslandBitmap(island, invertedIndex, block, graph, conflictVector)
+			} else {
+				processSingleIsland(island, block, graph)
+			}
 		}
 	})
 
-	// Reintegrate Hub Objects
-	concurrency.ParallelRun(int(n), func(jobQueue <-chan int) {
-		for txnIdx := range jobQueue {
-			reintegrateObjectRow(uint32(txnIdx), isHubObject, bucket, block, graph)
-		}
-	})
+	if numHubs > 0 {
+		// Reintegrate hub objects using bitwise OR sweeps
+		concurrency.ParallelRun(int(n), func(jobQueue <-chan int) {
+			// Allocated once per thread
+			conflictVector := make([]uint64, model.BucketSize)
 
-	graph.SyncSymmetry(n)
+			for txnIdx := range jobQueue {
+				reintegrateObjectRowVectorized(uint32(txnIdx), isHubObject, invertedIndex, block, graph, conflictVector)
+			}
+		})
+	}
+	return CalculateIslandStats(islands)
 }
 
-// reintegrateObjectRow allows a thread to securely write missing hub edges to its owned row
-func reintegrateObjectRow(txnIdx uint32, isHubObject []bool, bucket *model.ObjectIdBucket, block *model.Block, graph *model.ConflictGraph) {
-	for _, objID := range block.Transactions[txnIdx].WriteSet {
+// processLargeIslandBitmap evaluates large clusters using vector updates
+func processLargeIslandBitmap(island []uint32, invertedIndex *model.ObjectInvertedIndex, block *model.Block, graph *model.ConflictGraph, conflictVector []uint64) {
+	for _, txnIdx := range island {
+		txn := &block.Transactions[txnIdx]
+
+		// Accumulate write-set conflicts
+		for _, objID := range txn.WriteSet {
+			writers := invertedIndex.GetObjectWriteSetBucket(objID)
+			readers := invertedIndex.GetObjectReadSetBucket(objID)
+			for bIdx := range writers {
+				conflictVector[bIdx] |= writers[bIdx] | readers[bIdx]
+			}
+		}
+
+		// Accumulate read-set conflicts
+		for _, objID := range txn.ReadSet {
+			writers := invertedIndex.GetObjectWriteSetBucket(objID)
+			for bIdx := range writers {
+				conflictVector[bIdx] |= writers[bIdx]
+			}
+		}
+
+		// Clear self-conflict bit
+		wordIdx := txnIdx / model.SizeOfUint64
+		bitIdx := txnIdx % model.SizeOfUint64
+		conflictVector[wordIdx] &= ^(model.MaskActiveBit << bitIdx)
+
+		// Bulk write row directly to the graph bit-matrix
+		graph.AddRow(txnIdx, conflictVector)
+		clear(conflictVector)
+	}
+}
+
+// reintegrateObjectRowVectorized flushes hub object bitsets into a contiguous row write
+func reintegrateObjectRowVectorized(txnIdx uint32, isHubObject []bool, invertedIndex *model.ObjectInvertedIndex, block *model.Block, graph *model.ConflictGraph, conflictVector []uint64) {
+	txn := &block.Transactions[txnIdx]
+
+	// WriteSet touches trigger conflicts against both Writers and Readers of the hub object
+	for _, objID := range txn.WriteSet {
 		if !isHubObject[objID] {
 			continue
 		}
-		// Write-Write & Write-Read conflicts
-		for _, peer := range bucket.GetWriteSets(objID) {
-			if txnIdx < peer {
-				graph.AddEdge(txnIdx, peer)
-			}
-		}
-		for _, peer := range bucket.GetReaders(objID) {
-			if txnIdx < peer {
-				graph.AddEdge(txnIdx, peer)
-			}
+
+		writers := invertedIndex.GetObjectWriteSetBucket(objID)
+		readers := invertedIndex.GetObjectReadSetBucket(objID)
+		for bIdx := range writers {
+			conflictVector[bIdx] |= writers[bIdx] | readers[bIdx]
 		}
 	}
 
-	for _, objID := range block.Transactions[txnIdx].ReadSet {
+	// ReadSet touches trigger conflicts against Writers of the hub object
+	for _, objID := range txn.ReadSet {
 		if !isHubObject[objID] {
 			continue
 		}
-		// Read-Write conflicts
-		for _, peer := range bucket.GetWriteSets(objID) {
-			if txnIdx < peer {
-				graph.AddEdge(txnIdx, peer)
-			}
+		writers := invertedIndex.GetObjectWriteSetBucket(objID)
+		for bIdx := range writers {
+			conflictVector[bIdx] |= writers[bIdx]
 		}
 	}
+
+	// Clear the self-conflict bit
+	wordIdx := txnIdx / model.SizeOfUint64
+	bitIdx := txnIdx % model.SizeOfUint64
+	conflictVector[wordIdx] &= ^(model.MaskActiveBit << bitIdx)
+
+	graph.AddRow(txnIdx, conflictVector)
+	clear(conflictVector)
 }

@@ -10,7 +10,7 @@ type Task func(jobs <-chan int)
 
 // ParallelRun orchestrates a fixed-size worker pool to execute a task across all available logical cores
 func ParallelRun(totalTasks int, task Task) {
-	numWorkers := runtime.GOMAXPROCS(0) // possible improvement by *2 currentProcs
+	numWorkers := runtime.GOMAXPROCS(0)
 	var waitGroup sync.WaitGroup
 
 	jobQueue := make(chan int, totalTasks)
