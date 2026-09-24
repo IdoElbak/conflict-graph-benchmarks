@@ -30,3 +30,5 @@ Thumbs.db
 desktop.ini
 .DS_Store
 benchmark_results.json
+benchmark_results*.json
+tuning_results.json

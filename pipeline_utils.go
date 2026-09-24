@@ -16,18 +16,6 @@ import (
 )
 
 // BlockMetrics defines the analysis schema for the final JSON output
-//type BlockMetrics struct {
-//	Blockchain    string            `json:"blockchain"`
-//	BlockNumber   int64             `json:"block_number"`
-//	NumTxns       int               `json:"num_txns"`
-//	UniqueObjects uint32            `json:"unique_objects"`
-//	TotalEdges    uint32            `json:"total_edges"`
-//	Density       float64           `json:"density"`
-//	Times         map[string]string `json:"times"`
-//	Graph         []uint64          `json:"graph"`
-//}
-
-// BlockMetrics defines the analysis schema for the final JSON output
 type BlockMetrics struct {
 	Blockchain    string                `json:"blockchain"`
 	BlockNumber   int64                 `json:"block_number"`
@@ -36,7 +24,7 @@ type BlockMetrics struct {
 	TotalEdges    uint32                `json:"total_edges"`
 	Density       float64               `json:"density"`
 	Times         map[string]string     `json:"times"`
-	IslandMetrics map[string]IslandStat `json:"island_metrics"` // <-- This line was missing!
+	IslandMetrics map[string]IslandStat `json:"island_metrics"`
 	Graph         []uint64              `json:"graph"`
 }
 
@@ -77,26 +65,18 @@ func processFile(filePath string, blockchain string, manager *model.Manager, all
 	}
 
 	graphs := map[string]*model.ConflictGraph{
-		"Bitmap":                 model.NewConflictGraph(),
-		"IslandDynamicShattered": model.NewConflictGraph(),
-		"IslandObjectShattered":  model.NewConflictGraph(),
-		"IslandNativeShattered":  model.NewConflictGraph(),
-		//"IslandTxnShattered":    model.NewConflictGraph(),
+		"Bitmap":                  model.NewConflictGraph(),
+		"IslandNativeShattered":   model.NewConflictGraph(),
+		"IslandTopologyShattered": model.NewConflictGraph(), // reconstruction target for parity only
 	}
 
 	// Single preallocated topology structure reused by IslandNativeShattered
 	topology := model.NewBlockTopology()
 
-	// Preallocate the 7 graph structures ONCE to avoid GC thrashing during the stream
-	//graphs := map[string]*model.ConflictGraph{
-	//	"NaiveSequential":       model.NewConflictGraph(),
-	//	"NaiveParallel":         model.NewConflictGraph(),
-	//	"Bitmap":                model.NewConflictGraph(),
-	//	"IDBucket":              model.NewConflictGraph(),
-	//	"IslandNaive":           model.NewConflictGraph(),
-	//	"IslandObjectShattered": model.NewConflictGraph(),
-	//	"IslandTxnShattered":    model.NewConflictGraph(),
-	//}
+	// Separate instance for IslandTopologyShattered: its Islands/LocalGraphs/
+	// HubEdges ARE the output and must survive until the parity check, so it
+	// cannot share native's scratch (PrepareForBlock would wipe them).
+	topologyOutput := model.NewBlockTopology()
 
 	var block model.Block
 
@@ -105,7 +85,7 @@ func processFile(filePath string, blockchain string, manager *model.Manager, all
 	var maxTxns int
 	var blocksProcessed int
 
-	// FIX: Use a determinate progress bar based on maxBlocks
+	// Use a determinate progress bar based on maxBlocks
 	bar := progressbar.Default(int64(maxBlocks), fmt.Sprintf("Processing %s Blocks", blockchain))
 
 	for decoder.More() {
@@ -142,23 +122,17 @@ func processFile(filePath string, blockchain string, manager *model.Manager, all
 			Times:         make(map[string]string),
 		}
 
-		runAlgorithmsAndVerify(&block, graphs, &metrics, topology)
+		runAlgorithmsAndVerify(&block, graphs, &metrics, topology, topologyOutput)
 
 		*allMetrics = append(*allMetrics, metrics)
 		blocksProcessed++
 		bar.Add(1) // Advance the bar safely
 	}
 
-	// FIX: Cleanly terminate the progress bar to prevent visual glitches
+	// Cleanly terminate the progress bar to prevent visual glitches
 	bar.Finish()
 	fmt.Println()
 
-	// Print the required statistics
-	//if blocksProcessed > 0 {
-	//	avgTxns := float64(totalTxns) / float64(blocksProcessed)
-	//	fmt.Printf("    [%s Stats] Processed: %d blocks | Avg Size: %.2f txns | Max Size: %d txns\n\n",
-	//		blockchain, blocksProcessed, avgTxns, maxTxns)
-	//}
 	// Print the required statistics
 	if blocksProcessed > 0 {
 		avgTxns := float64(totalTxns) / float64(blocksProcessed)
@@ -166,7 +140,7 @@ func processFile(filePath string, blockchain string, manager *model.Manager, all
 			blockchain, blocksProcessed, avgTxns, maxTxns)
 
 		fmt.Println("    --- Island Topology Statistics ---")
-		for _, algName := range []string{"IslandDynamicShattered", "IslandObjectShattered", "IslandNativeShattered"} {
+		for _, algName := range []string{"IslandNativeShattered", "IslandTopologyShattered"} {
 			var totalIslands, maxIslands, maxIslandSize int
 			var sumAvgSizes float64
 			var validBlocks int
@@ -196,7 +170,7 @@ func processFile(filePath string, blockchain string, manager *model.Manager, all
 	}
 }
 
-func runAlgorithmsAndVerify(block *model.Block, graphs map[string]*model.ConflictGraph, metrics *BlockMetrics, topology *model.BlockTopology) {
+func runAlgorithmsAndVerify(block *model.Block, graphs map[string]*model.ConflictGraph, metrics *BlockMetrics, topology *model.BlockTopology, topologyOutput *model.BlockTopology) {
 	blockSize := uint32(len(block.Transactions))
 	iterations := 500
 	metrics.IslandMetrics = make(map[string]IslandStat)
@@ -221,12 +195,28 @@ func runAlgorithmsAndVerify(block *model.Block, graphs map[string]*model.Conflic
 
 	// Run only the optimized baseline and the target algorithms
 	benchmarkAlg("Bitmap", algorithms.BitmapConstruction)
-	benchmarkAlg("IslandDynamicShattered", algorithms.IslandConstructionDynamicShattered)
-	benchmarkAlg("IslandObjectShattered", algorithms.IslandConstructionObjectShattered)
-	//benchmarkAlg("IslandTxnShattered", algorithms.IslandConstructionTxnShattered)
 	benchmarkAlg("IslandNativeShattered", func(b *model.Block, g *model.ConflictGraph) (int, int, float64) {
 		return algorithms.IslandConstructionNativeShattered(b, g, topology)
 	})
+
+	// IslandTopologyShattered never touches the global matrix, so its timed
+	// loop has no per-iteration graph.Reset; the reconstruction below runs
+	// untimed and only materializes the output for the parity check.
+	{
+		name := "IslandTopologyShattered"
+		var count, maxSz int
+		var avgSz float64
+		start := time.Now()
+		for i := 0; i < iterations; i++ {
+			count, maxSz, avgSz = algorithms.IslandConstructionTopologyShattered(block, topologyOutput)
+		}
+		avgTime := time.Since(start) / time.Duration(iterations)
+		metrics.Times[name] = avgTime.String()
+		if count > 0 {
+			metrics.IslandMetrics[name] = IslandStat{Count: count, MaxSize: maxSz, AvgSize: avgSz}
+		}
+		algorithms.ReconstructTopologyGraph(topologyOutput, graphs[name])
+	}
 
 	// Use Bitmap as the deterministic source of truth
 	truthGraph := graphs["Bitmap"]
@@ -250,52 +240,6 @@ func runAlgorithmsAndVerify(block *model.Block, graphs map[string]*model.Conflic
 	metrics.Density = density
 	metrics.Graph = truthGraph.Export(blockSize)
 }
-
-//func runAlgorithmsAndVerify(block *model.Block, graphs map[string]*model.ConflictGraph, metrics *BlockMetrics) {
-//	blockSize := uint32(len(block.Transactions))
-//	iterations := 500
-//
-//	benchmarkAlg := func(name string, alg func(*model.Block, *model.ConflictGraph)) {
-//		graph := graphs[name]
-//		start := time.Now()
-//		for i := 0; i < iterations; i++ {
-//			graph.Reset(blockSize)
-//			alg(block, graph)
-//		}
-//		avgTime := time.Since(start) / time.Duration(iterations)
-//		metrics.Times[name] = avgTime.String()
-//	}
-//
-//	benchmarkAlg("NaiveSequential", algorithms.NaiveSequential)
-//	benchmarkAlg("NaiveParallel", algorithms.NaiveParallel)
-//	benchmarkAlg("Bitmap", algorithms.BitmapConstruction)
-//	benchmarkAlg("IDBucket", algorithms.IDBucketConstruction)
-//	benchmarkAlg("IslandNaive", algorithms.IslandConstructionNaive)
-//	benchmarkAlg("IslandObjectShattered", algorithms.IslandConstructionObjectShattered)
-//	benchmarkAlg("IslandTxnShattered", algorithms.IslandConstructionTxnShattered)
-//
-//	truthGraph := graphs["NaiveSequential"]
-//	for name, testGraph := range graphs {
-//		if name == "NaiveSequential" {
-//			continue
-//		}
-//		if !truthGraph.AreGraphsEqual(testGraph, blockSize) {
-//			log.Fatalf("\n[FATAL ERROR] %s corrupted the graph on block %d!", name, metrics.BlockNumber)
-//		}
-//	}
-//
-//	// Calculate and save topology metrics silently
-//	edges := truthGraph.CountEdges(blockSize)
-//	maxEdges := (blockSize * (blockSize - 1)) / 2
-//	var density float64 = 0
-//	if maxEdges > 0 {
-//		density = float64(edges) / float64(maxEdges)
-//	}
-//
-//	metrics.TotalEdges = edges
-//	metrics.Density = density
-//	metrics.Graph = truthGraph.Export(blockSize)
-//}
 
 func saveMetrics(metrics []BlockMetrics, filename string) {
 	file, err := os.Create(filename)

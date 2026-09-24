@@ -11,7 +11,7 @@ import (
 func main() {
 	fmt.Println("=== Conflict Graph Benchmark Engine ===")
 
-	// 1. Skip if results already exist
+	// Skip if results already exist
 	if _, err := os.Stat("benchmark_results.json"); err == nil {
 		fmt.Println("\n[Skipped] benchmark_results.json already exists. Remove it to run a new benchmark.")
 		return

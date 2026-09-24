@@ -5,13 +5,12 @@ import (
 	"sync/atomic"
 )
 
-// Edge is a sparse conflict between two global transaction indices,
-// recorded during hub reintegration for the downstream scheduler.
+// Edge is a conflict between two transaction indices
 type Edge struct {
 	TxnA, TxnB uint32
 }
 
-// BlockTopology is the "Masked Island" output plus all reusable scratch memory
+// BlockTopology is the "Masked Island" output plus all reusable memory
 // for IslandConstructionNativeShattered. Physical conflict bits live in the
 // global ConflictGraph matrix; this structure carries the logical isolation map
 // (disjoint islands + sparse hub edges) that the downstream scheduler consumes.
@@ -24,6 +23,14 @@ type Edge struct {
 type BlockTopology struct {
 	Islands  [][]uint32 // logical txn groupings, views into txnArena
 	HubEdges [][]Edge   // per-worker sparse hub conflict lists
+
+	// LocalGraphs holds one packed symmetric bit-matrix per island (same order
+	// as Islands) in local coordinates: row p covers island[p] and spans
+	// LocalWidths[i] (= ceil(len(island)/64)) words. Views into localArena.
+	// Used only by the topology-output pipeline; untouched by NativeShattered.
+	LocalGraphs [][]uint64
+	LocalWidths []uint32
+	localArena  []uint64
 
 	// Compact inverted index: one row of RowWidth (= ceil(n/64)) words per object.
 	ReadBits  []uint64
@@ -101,6 +108,34 @@ func (topo *BlockTopology) PrepareForBlock(n, numObjects, rowWidth uint32) {
 	topo.HubTouchers = topo.HubTouchers[:0]
 	for i := range topo.HubEdges {
 		topo.HubEdges[i] = topo.HubEdges[i][:0]
+	}
+}
+
+// PrepareLocalGraphs carves one all-zero local bit-matrix per island out of the
+// shared arena, in the same order as topo.Islands. Called after GroupIslands by
+// the topology-output pipeline only, so it also owns resetting its own slices
+// (keeping PrepareForBlock — and therefore NativeShattered — untouched). The
+// arena reallocates only when a block needs more words than any block before.
+func (topo *BlockTopology) PrepareLocalGraphs() {
+	topo.LocalGraphs = topo.LocalGraphs[:0]
+	topo.LocalWidths = topo.LocalWidths[:0]
+
+	totalWords := 0
+	for _, island := range topo.Islands {
+		k := len(island)
+		totalWords += k * int((uint32(k)+SizeOfUint64-1)/SizeOfUint64)
+	}
+	topo.localArena = growU64(topo.localArena, totalWords)
+	clear(topo.localArena[:totalWords])
+
+	offset := 0
+	for _, island := range topo.Islands {
+		k := len(island)
+		width := (uint32(k) + SizeOfUint64 - 1) / SizeOfUint64
+		words := k * int(width)
+		topo.LocalGraphs = append(topo.LocalGraphs, topo.localArena[offset:offset+words])
+		topo.LocalWidths = append(topo.LocalWidths, width)
+		offset += words
 	}
 }
 

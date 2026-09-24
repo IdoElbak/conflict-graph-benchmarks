@@ -6,14 +6,6 @@ import (
 	"conflict-graph-benchmarks/internal/concurrency"
 	"conflict-graph-benchmarks/internal/model"
 )
-	
-// PairwiseIslandMax is the island size at or below which direct pairwise set
-// scans beat bitwise row sweeps, letting tiny islands dodge the index entirely.
-const PairwiseIslandMax = 6
-
-// SequentialBlockMax is the block size at or below which goroutine spawn
-// overhead exceeds the parallel gain, so both phases run inline.
-const SequentialBlockMax uint32 = 384
 
 // IslandConstructionNativeShattered implements the "Masked Island" paradigm on a
 // preallocated BlockTopology: physical bits go into the global ConflictGraph,
@@ -91,84 +83,6 @@ func IslandConstructionNativeShattered(block *model.Block, graph *model.Conflict
 	wipeLazyIndex(block, topo, rowWidth)
 
 	return CalculateIslandStats(topo.Islands)
-}
-
-// countAccessesAndDetectHubs tallies per-object accesses and registers a hub
-// the moment its count crosses ObjectHubThreshold.
-func countAccessesAndDetectHubs(block *model.Block, topo *model.BlockTopology) {
-	for txnIdx := range block.Transactions {
-		txn := &block.Transactions[txnIdx]
-		for _, objID := range txn.ReadSet {
-			topo.Counts[objID]++
-			if topo.Counts[objID] == ObjectHubThreshold+1 {
-				topo.IsHub[objID] = true
-				topo.HubObjs = append(topo.HubObjs, objID)
-			}
-		}
-		for _, objID := range txn.WriteSet {
-			topo.Counts[objID]++
-			if topo.Counts[objID] == ObjectHubThreshold+1 {
-				topo.IsHub[objID] = true
-				topo.HubObjs = append(topo.HubObjs, objID)
-			}
-		}
-	}
-}
-
-// collectHubTouchers appends every transaction accessing a hub object to
-// topo.HubTouchers.
-func collectHubTouchers(block *model.Block, topo *model.BlockTopology, n uint32) {
-	for txnIdx := uint32(0); txnIdx < n; txnIdx++ {
-		txn := &block.Transactions[txnIdx]
-		touchesHub := false
-		for _, objID := range txn.WriteSet {
-			if topo.IsHub[objID] {
-				touchesHub = true
-				break
-			}
-		}
-		if !touchesHub {
-			for _, objID := range txn.ReadSet {
-				if topo.IsHub[objID] {
-					touchesHub = true
-					break
-				}
-			}
-		}
-		if touchesHub {
-			topo.HubTouchers = append(topo.HubTouchers, txnIdx)
-		}
-	}
-}
-
-// partitionViaAnchors runs the star-topology Union-Find in two O(accesses)
-// passes over the raw access sets: writers claim/join each non-hub object's
-// anchor, then readers join anchored objects. Read-only objects never union.
-func partitionViaAnchors(block *model.Block, topo *model.BlockTopology) {
-	for txnIdx := range block.Transactions {
-		tIdx := uint32(txnIdx)
-		for _, objID := range block.Transactions[txnIdx].WriteSet {
-			if topo.IsHub[objID] {
-				continue
-			}
-			if anchor := topo.AnchorOf[objID]; anchor == 0 {
-				topo.AnchorOf[objID] = tIdx + 1
-			} else {
-				topo.Union(anchor-1, tIdx)
-			}
-		}
-	}
-	for txnIdx := range block.Transactions {
-		tIdx := uint32(txnIdx)
-		for _, objID := range block.Transactions[txnIdx].ReadSet {
-			if topo.IsHub[objID] {
-				continue
-			}
-			if anchor := topo.AnchorOf[objID]; anchor != 0 {
-				topo.Union(anchor-1, tIdx)
-			}
-		}
-	}
 }
 
 // buildLazyIndex populates object rows only where they will actually be read:

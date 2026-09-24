@@ -1,3 +1,5 @@
+//go:build ignore
+
 package algorithms
 
 import (
@@ -5,7 +7,9 @@ import (
 	"conflict-graph-benchmarks/internal/model"
 )
 
-const ObjectHubThreshold uint32 = 50
+// ObjectHubThreshold now lives in island_shared.go (still used by the live
+// island family); on revival this file picks it up from there automatically.
+
 const LargeIslandThreshold = 32
 
 // IslandConstructionObjectShattered removes highly contested objects from the Union-Find phase
