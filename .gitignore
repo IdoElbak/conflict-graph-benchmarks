@@ -12,11 +12,18 @@ projects_code.txt
 # Gathered traces
 internal/digestion/data/
 
+# Generated synthetic traces (regenerable from their seeds; the small
+# *_manifest.json files next to them stay tracked for verification)
+internal/digestion/syn_data/*_blocks.json
+
 # GoLand / JetBrains IDE files
 .idea/
 *.iws
 *.iml
 *.ipr
+
+# Python bytecode
+__pycache__/
 
 # Output and temporary files
 *.test

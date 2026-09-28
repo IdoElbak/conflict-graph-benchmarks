@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime"
+	"slices"
 	"time"
 
 	"conflict-graph-benchmarks/internal/algorithms"
@@ -17,15 +19,15 @@ import (
 
 // BlockMetrics defines the analysis schema for the final JSON output
 type BlockMetrics struct {
-	Blockchain    string                `json:"blockchain"`
-	BlockNumber   int64                 `json:"block_number"`
-	NumTxns       int                   `json:"num_txns"`
-	UniqueObjects uint32                `json:"unique_objects"`
-	TotalEdges    uint32                `json:"total_edges"`
-	Density       float64               `json:"density"`
-	Times         map[string]string     `json:"times"`
-	IslandMetrics map[string]IslandStat `json:"island_metrics"`
-	Graph         []uint64              `json:"graph"`
+	Blockchain     string                `json:"blockchain"`
+	BlockNumber    int64                 `json:"block_number"`
+	NumTxns        int                   `json:"num_txns"`
+	UniqueObjects  uint32                `json:"unique_objects"`
+	TotalEdges     uint32                `json:"total_edges"`
+	Density        float64               `json:"density"`
+	ConflictedTxns float64               `json:"conflicted_txns_ratio"`
+	Times          map[string]string     `json:"times"`
+	IslandMetrics  map[string]IslandStat `json:"island_metrics"`
 }
 
 type IslandStat struct {
@@ -84,6 +86,7 @@ func processFile(filePath string, blockchain string, manager *model.Manager, all
 	var totalTxns int
 	var maxTxns int
 	var blocksProcessed int
+	var skippedBlocks int
 
 	// Use a determinate progress bar based on maxBlocks
 	bar := progressbar.Default(int64(maxBlocks), fmt.Sprintf("Processing %s Blocks", blockchain))
@@ -100,8 +103,15 @@ func processFile(filePath string, blockchain string, manager *model.Manager, all
 			continue
 		}
 
+		// Every structure is preallocated for model.MaximumGraphSize txns; a
+		// larger block would silently spill into neighbouring rows, so skip it.
+		numTxns := len(cleanBlock.Transactions)
+		if numTxns > int(model.MaximumGraphSize) {
+			skippedBlocks++
+			continue
+		}
+
 		// Track statistics
-		numTxns := cleanBlock.NumTransactions
 		totalTxns += numTxns
 		if numTxns > maxTxns {
 			maxTxns = numTxns
@@ -117,7 +127,7 @@ func processFile(filePath string, blockchain string, manager *model.Manager, all
 		metrics := BlockMetrics{
 			Blockchain:    blockchain,
 			BlockNumber:   cleanBlock.BlockNumber,
-			NumTxns:       cleanBlock.NumTransactions,
+			NumTxns:       numTxns,
 			UniqueObjects: block.NumUniqueObjects,
 			Times:         make(map[string]string),
 		}
@@ -132,6 +142,9 @@ func processFile(filePath string, blockchain string, manager *model.Manager, all
 	// Cleanly terminate the progress bar to prevent visual glitches
 	bar.Finish()
 	fmt.Println()
+	if skippedBlocks > 0 {
+		log.Printf("    [%s] skipped %d blocks larger than MaximumGraphSize (%d txns)", blockchain, skippedBlocks, model.MaximumGraphSize)
+	}
 
 	// Print the required statistics
 	if blocksProcessed > 0 {
@@ -170,9 +183,33 @@ func processFile(filePath string, blockchain string, manager *model.Manager, all
 	}
 }
 
+const (
+	// timingRounds x iterationsPerRound calls are timed per block and algorithm.
+	timingRounds       = 5
+	iterationsPerRound = 100
+)
+
+// timeAlgorithm returns the median per-call time over timingRounds rounds of
+// iterationsPerRound calls. One untimed warm-up call and a GC come first, so
+// every algorithm starts warm and from the same heap state; the median of
+// short rounds discards rounds disturbed by an interrupt or core migration.
+func timeAlgorithm(run func()) time.Duration {
+	run()
+	runtime.GC()
+	var rounds [timingRounds]int64
+	for r := range rounds {
+		start := nowNanos()
+		for range iterationsPerRound {
+			run()
+		}
+		rounds[r] = (nowNanos() - start) / iterationsPerRound
+	}
+	slices.Sort(rounds[:])
+	return time.Duration(rounds[timingRounds/2])
+}
+
 func runAlgorithmsAndVerify(block *model.Block, graphs map[string]*model.ConflictGraph, metrics *BlockMetrics, topology *model.BlockTopology, topologyOutput *model.BlockTopology) {
 	blockSize := uint32(len(block.Transactions))
-	iterations := 500
 	metrics.IslandMetrics = make(map[string]IslandStat)
 
 	benchmarkAlg := func(name string, alg func(*model.Block, *model.ConflictGraph) (int, int, float64)) {
@@ -180,13 +217,10 @@ func runAlgorithmsAndVerify(block *model.Block, graphs map[string]*model.Conflic
 		var count, maxSz int
 		var avgSz float64
 
-		start := time.Now()
-		for i := 0; i < iterations; i++ {
+		metrics.Times[name] = timeAlgorithm(func() {
 			graph.Reset(blockSize)
 			count, maxSz, avgSz = alg(block, graph)
-		}
-		avgTime := time.Since(start) / time.Duration(iterations)
-		metrics.Times[name] = avgTime.String()
+		}).String()
 
 		if count > 0 {
 			metrics.IslandMetrics[name] = IslandStat{Count: count, MaxSize: maxSz, AvgSize: avgSz}
@@ -206,12 +240,9 @@ func runAlgorithmsAndVerify(block *model.Block, graphs map[string]*model.Conflic
 		name := "IslandTopologyShattered"
 		var count, maxSz int
 		var avgSz float64
-		start := time.Now()
-		for i := 0; i < iterations; i++ {
+		metrics.Times[name] = timeAlgorithm(func() {
 			count, maxSz, avgSz = algorithms.IslandConstructionTopologyShattered(block, topologyOutput)
-		}
-		avgTime := time.Since(start) / time.Duration(iterations)
-		metrics.Times[name] = avgTime.String()
+		}).String()
 		if count > 0 {
 			metrics.IslandMetrics[name] = IslandStat{Count: count, MaxSize: maxSz, AvgSize: avgSz}
 		}
@@ -238,7 +269,24 @@ func runAlgorithmsAndVerify(block *model.Block, graphs map[string]*model.Conflic
 
 	metrics.TotalEdges = edges
 	metrics.Density = density
-	metrics.Graph = truthGraph.Export(blockSize)
+	metrics.ConflictedTxns = conflictedTxnsRatio(truthGraph, blockSize)
+}
+
+// conflictedTxnsRatio returns the fraction of transactions with at least one
+// conflict edge, the other common "conflict ratio" definition next to density.
+func conflictedTxnsRatio(graph *model.ConflictGraph, blockSize uint32) float64 {
+	if blockSize == 0 {
+		return 0
+	}
+	rows := graph.Export(blockSize)
+	conflicted := 0
+	for i := uint32(0); i < blockSize; i++ {
+		row := rows[i*model.BucketSize : (i+1)*model.BucketSize]
+		if slices.ContainsFunc(row, func(word uint64) bool { return word != 0 }) {
+			conflicted++
+		}
+	}
+	return float64(conflicted) / float64(blockSize)
 }
 
 func saveMetrics(metrics []BlockMetrics, filename string) {

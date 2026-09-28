@@ -8,8 +8,24 @@ import (
 	"conflict-graph-benchmarks/internal/model"
 )
 
+// traces lists every benchmarked trace in presentation order; the name is the
+// "blockchain" label in benchmark_results.json.
+var traces = []struct {
+	name      string
+	path      string
+	maxBlocks int
+}{
+	{"Ethereum", digestion.EthCleanFilePath, 1000},
+	{"EthereumNoHub", digestion.EthNoHubsCleanFilePath, 1000},
+	{"Solana", digestion.SolanaCleanFilePath, 100},
+	{"Sui", digestion.SuiCleanFilePath, 2000},
+	{"YCSB", digestion.YCSBFilePath, digestion.SyntheticBlockCount},
+	{"TPC", digestion.TPCFilePath, digestion.SyntheticBlockCount},
+}
+
 func main() {
 	fmt.Println("=== Conflict Graph Benchmark Engine ===")
+	fmt.Println("[Platform]", prepareProcess())
 
 	// Skip if results already exist
 	if _, err := os.Stat("benchmark_results.json"); err == nil {
@@ -25,23 +41,25 @@ func main() {
 	fmt.Println("\n[Phase 2 & 3] Streaming Blocks and Executing Algorithms...")
 	manager := model.NewManager()
 	var allMetrics []BlockMetrics
-
-	// Define specific file paths
-	ethFile := "internal/digestion/data/Eth_cleaned_blocks_21297000_21297999.json"
-	solFile := "internal/digestion/data/Solana_cleaned_blocks_391000000_391000998.json"
-
-	processFile(ethFile, "Ethereum", manager, &allMetrics, 1000)
-	processFile(solFile, "Solana", manager, &allMetrics, 100)
+	for _, trace := range traces {
+		processFile(trace.path, trace.name, manager, &allMetrics, trace.maxBlocks)
+	}
 
 	// Phase 4: Analysis Export
 	fmt.Println("\n[Phase 4] Exporting Analysis Metrics...")
 	saveMetrics(allMetrics, "benchmark_results.json")
 }
 
+// runDigestionPhase produces every derived trace that does not exist yet. The
+// no-hub Ethereum filter must run after the Ethereum parser it reads from.
 func runDigestionPhase() {
 	pipeline := []func() error{
 		digestion.ParseEthereumStream,
+		digestion.GenerateEthereumNoHubTrace,
 		digestion.ParseSolanaStream,
+		digestion.ParseSuiStream,
+		digestion.GenerateYCSBTrace,
+		digestion.GenerateTPCTrace,
 	}
 	runParsers(pipeline)
 }

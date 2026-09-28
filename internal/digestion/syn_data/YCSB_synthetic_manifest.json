@@ -1,0 +1,1320 @@
+{
+  "generator": "YCSB",
+  "seed": 1579290078873892,
+  "go_version": "go1.26.2",
+  "knob": "zipf_theta",
+  "density_levels": [
+    0.001,
+    0.003,
+    0.01,
+    0.03,
+    0.1,
+    0.2,
+    0.4,
+    0.6,
+    0.8
+  ],
+  "size_bands": [
+    {
+      "lo": 0,
+      "hi": 100,
+      "per_level": 5
+    },
+    {
+      "lo": 100,
+      "hi": 200,
+      "per_level": 1
+    },
+    {
+      "lo": 200,
+      "hi": 1000,
+      "per_level": 10
+    },
+    {
+      "lo": 1000,
+      "hi": 1200,
+      "per_level": 1
+    },
+    {
+      "lo": 1200,
+      "hi": 2001,
+      "per_level": 3
+    }
+  ],
+  "params": {
+    "workload": "A (update heavy)",
+    "record_count": 10000000,
+    "ops_per_txn": [
+      4,
+      12
+    ],
+    "read_proportion": 0.5,
+    "theta_range": [
+      0,
+      4
+    ]
+  },
+  "trace_sha256": "f1385943ee6fe79092bca77f39d5ab0317d9567c1d3a3aeefcfa48dd774c6ad6",
+  "blocks": [
+    {
+      "block_number": 0,
+      "num_txns": 627,
+      "target_density": 0.03,
+      "realized_density": 0.0302469796332248,
+      "knob_value": 0.875
+    },
+    {
+      "block_number": 1,
+      "num_txns": 1569,
+      "target_density": 0.003,
+      "realized_density": 0.0030444778293726668,
+      "knob_value": 0.765625
+    },
+    {
+      "block_number": 2,
+      "num_txns": 830,
+      "target_density": 0.01,
+      "realized_density": 0.010022236109698142,
+      "knob_value": 0.8203125
+    },
+    {
+      "block_number": 3,
+      "num_txns": 424,
+      "target_density": 0.01,
+      "realized_density": 0.010448726526606895,
+      "knob_value": 0.828125
+    },
+    {
+      "block_number": 4,
+      "num_txns": 34,
+      "target_density": 0.2,
+      "realized_density": 0.19073083778966132,
+      "knob_value": 1.01171875
+    },
+    {
+      "block_number": 5,
+      "num_txns": 354,
+      "target_density": 0.6,
+      "realized_density": 0.5755509674941182,
+      "knob_value": 1.125
+    },
+    {
+      "block_number": 6,
+      "num_txns": 24,
+      "target_density": 0.1,
+      "realized_density": 0.10144927536231885,
+      "knob_value": 0.97509765625
+    },
+    {
+      "block_number": 7,
+      "num_txns": 1047,
+      "target_density": 0.8,
+      "realized_density": 0.8060414806211319,
+      "knob_value": 1.25
+    },
+    {
+      "block_number": 8,
+      "num_txns": 1936,
+      "target_density": 0.2,
+      "realized_density": 0.19596279923975485,
+      "knob_value": 1
+    },
+    {
+      "block_number": 9,
+      "num_txns": 215,
+      "target_density": 0.001,
+      "realized_density": 0.0010432514670723756,
+      "knob_value": 0.7265625
+    },
+    {
+      "block_number": 10,
+      "num_txns": 90,
+      "target_density": 0.8,
+      "realized_density": 0.8059925093632959,
+      "knob_value": 1.21875
+    },
+    {
+      "block_number": 11,
+      "num_txns": 412,
+      "target_density": 0.1,
+      "realized_density": 0.10180001417333995,
+      "knob_value": 0.94140625
+    },
+    {
+      "block_number": 12,
+      "num_txns": 54,
+      "target_density": 0.01,
+      "realized_density": 0.009783368273934312,
+      "knob_value": 0.81494140625
+    },
+    {
+      "block_number": 13,
+      "num_txns": 750,
+      "target_density": 0.8,
+      "realized_density": 0.8057961726746774,
+      "knob_value": 1.25
+    },
+    {
+      "block_number": 14,
+      "num_txns": 41,
+      "target_density": 0.6,
+      "realized_density": 0.5817073170731707,
+      "knob_value": 1.125
+    },
+    {
+      "block_number": 15,
+      "num_txns": 1138,
+      "target_density": 0.03,
+      "realized_density": 0.029886251396933006,
+      "knob_value": 0.873046875
+    },
+    {
+      "block_number": 16,
+      "num_txns": 62,
+      "target_density": 0.2,
+      "realized_density": 0.20095187731359068,
+      "knob_value": 1
+    },
+    {
+      "block_number": 17,
+      "num_txns": 813,
+      "target_density": 0.001,
+      "realized_density": 0.0010088524530565504,
+      "knob_value": 0.6953125
+    },
+    {
+      "block_number": 18,
+      "num_txns": 558,
+      "target_density": 0.4,
+      "realized_density": 0.4181064715610381,
+      "knob_value": 1.0703125
+    },
+    {
+      "block_number": 19,
+      "num_txns": 526,
+      "target_density": 0.03,
+      "realized_density": 0.029324642404490314,
+      "knob_value": 0.875
+    },
+    {
+      "block_number": 20,
+      "num_txns": 1788,
+      "target_density": 0.03,
+      "realized_density": 0.031001929170281512,
+      "knob_value": 0.8671875
+    },
+    {
+      "block_number": 21,
+      "num_txns": 905,
+      "target_density": 0.03,
+      "realized_density": 0.030518750305578643,
+      "knob_value": 0.8828125
+    },
+    {
+      "block_number": 22,
+      "num_txns": 67,
+      "target_density": 0.01,
+      "realized_density": 0.009950248756218905,
+      "knob_value": 0.796875
+    },
+    {
+      "block_number": 23,
+      "num_txns": 1825,
+      "target_density": 0.003,
+      "realized_density": 0.0029842585916846913,
+      "knob_value": 0.76953125
+    },
+    {
+      "block_number": 24,
+      "num_txns": 114,
+      "target_density": 0.4,
+      "realized_density": 0.38363608135382704,
+      "knob_value": 1.09375
+    },
+    {
+      "block_number": 25,
+      "num_txns": 228,
+      "target_density": 0.03,
+      "realized_density": 0.03018007574001082,
+      "knob_value": 0.86328125
+    },
+    {
+      "block_number": 26,
+      "num_txns": 0,
+      "target_density": 0.4,
+      "realized_density": 0,
+      "knob_value": 2
+    },
+    {
+      "block_number": 27,
+      "num_txns": 472,
+      "target_density": 0.6,
+      "realized_density": 0.5758663499946022,
+      "knob_value": 1.125
+    },
+    {
+      "block_number": 28,
+      "num_txns": 954,
+      "target_density": 0.6,
+      "realized_density": 0.606197795332405,
+      "knob_value": 1.140625
+    },
+    {
+      "block_number": 29,
+      "num_txns": 867,
+      "target_density": 0.003,
+      "realized_density": 0.003092610498893213,
+      "knob_value": 0.767578125
+    },
+    {
+      "block_number": 30,
+      "num_txns": 47,
+      "target_density": 0.03,
+      "realized_density": 0.028677150786308975,
+      "knob_value": 0.859375
+    },
+    {
+      "block_number": 31,
+      "num_txns": 432,
+      "target_density": 0.03,
+      "realized_density": 0.030097963392626964,
+      "knob_value": 0.87890625
+    },
+    {
+      "block_number": 32,
+      "num_txns": 1091,
+      "target_density": 0.4,
+      "realized_density": 0.398921955280485,
+      "knob_value": 1.078125
+    },
+    {
+      "block_number": 33,
+      "num_txns": 2000,
+      "target_density": 0.01,
+      "realized_density": 0.009580790395197599,
+      "knob_value": 0.8125
+    },
+    {
+      "block_number": 34,
+      "num_txns": 623,
+      "target_density": 0.8,
+      "realized_density": 0.8136596594633373,
+      "knob_value": 1.25
+    },
+    {
+      "block_number": 35,
+      "num_txns": 386,
+      "target_density": 0.2,
+      "realized_density": 0.1927461139896373,
+      "knob_value": 1
+    },
+    {
+      "block_number": 36,
+      "num_txns": 69,
+      "target_density": 0.8,
+      "realized_density": 0.7932651321398124,
+      "knob_value": 1.3125
+    },
+    {
+      "block_number": 37,
+      "num_txns": 1636,
+      "target_density": 0.2,
+      "realized_density": 0.19574407632548993,
+      "knob_value": 1
+    },
+    {
+      "block_number": 38,
+      "num_txns": 237,
+      "target_density": 0.8,
+      "realized_density": 0.8180290352570979,
+      "knob_value": 1.25
+    },
+    {
+      "block_number": 39,
+      "num_txns": 308,
+      "target_density": 0.8,
+      "realized_density": 0.8271923516223191,
+      "knob_value": 1.25
+    },
+    {
+      "block_number": 40,
+      "num_txns": 175,
+      "target_density": 0.1,
+      "realized_density": 0.09543513957307061,
+      "knob_value": 0.9453125
+    },
+    {
+      "block_number": 41,
+      "num_txns": 565,
+      "target_density": 0.1,
+      "realized_density": 0.09669239942258206,
+      "knob_value": 0.9453125
+    },
+    {
+      "block_number": 42,
+      "num_txns": 348,
+      "target_density": 0.003,
+      "realized_density": 0.0030474676206565304,
+      "knob_value": 0.75390625
+    },
+    {
+      "block_number": 43,
+      "num_txns": 1269,
+      "target_density": 0.2,
+      "realized_density": 0.202782687378969,
+      "knob_value": 1
+    },
+    {
+      "block_number": 44,
+      "num_txns": 1320,
+      "target_density": 0.8,
+      "realized_density": 0.8132814115376663,
+      "knob_value": 1.25
+    },
+    {
+      "block_number": 45,
+      "num_txns": 74,
+      "target_density": 0.4,
+      "realized_density": 0.40429470566456865,
+      "knob_value": 1.05859375
+    },
+    {
+      "block_number": 46,
+      "num_txns": 11,
+      "target_density": 0.2,
+      "realized_density": 0.2,
+      "knob_value": 1.0625
+    },
+    {
+      "block_number": 47,
+      "num_txns": 585,
+      "target_density": 0.8,
+      "realized_density": 0.8360554970144011,
+      "knob_value": 1.25
+    },
+    {
+      "block_number": 48,
+      "num_txns": 10,
+      "target_density": 0.6,
+      "realized_density": 0.5777777777777777,
+      "knob_value": 1.25
+    },
+    {
+      "block_number": 49,
+      "num_txns": 762,
+      "target_density": 0.03,
+      "realized_density": 0.02970259466581132,
+      "knob_value": 0.875
+    },
+    {
+      "block_number": 50,
+      "num_txns": 579,
+      "target_density": 0.2,
+      "realized_density": 0.1953134804668591,
+      "knob_value": 0.9921875
+    },
+    {
+      "block_number": 51,
+      "num_txns": 35,
+      "target_density": 0.003,
+      "realized_density": 0.0033613445378151263,
+      "knob_value": 0.8359375
+    },
+    {
+      "block_number": 52,
+      "num_txns": 891,
+      "target_density": 0.4,
+      "realized_density": 0.4109257367684334,
+      "knob_value": 1.078125
+    },
+    {
+      "block_number": 53,
+      "num_txns": 614,
+      "target_density": 0.01,
+      "realized_density": 0.010133321997332497,
+      "knob_value": 0.8125
+    },
+    {
+      "block_number": 54,
+      "num_txns": 1004,
+      "target_density": 0.001,
+      "realized_density": 0.0009572875000496519,
+      "knob_value": 0.69140625
+    },
+    {
+      "block_number": 55,
+      "num_txns": 375,
+      "target_density": 0.003,
+      "realized_density": 0.0028805704099821748,
+      "knob_value": 0.734375
+    },
+    {
+      "block_number": 56,
+      "num_txns": 673,
+      "target_density": 0.003,
+      "realized_density": 0.0031353923441590605,
+      "knob_value": 0.7578125
+    },
+    {
+      "block_number": 57,
+      "num_txns": 273,
+      "target_density": 0.4,
+      "realized_density": 0.40123357035121743,
+      "knob_value": 1.0703125
+    },
+    {
+      "block_number": 58,
+      "num_txns": 317,
+      "target_density": 0.03,
+      "realized_density": 0.029089965259753225,
+      "knob_value": 0.87109375
+    },
+    {
+      "block_number": 59,
+      "num_txns": 462,
+      "target_density": 0.2,
+      "realized_density": 0.19321820623339062,
+      "knob_value": 1.0078125
+    },
+    {
+      "block_number": 60,
+      "num_txns": 518,
+      "target_density": 0.8,
+      "realized_density": 0.7952473058856038,
+      "knob_value": 1.25
+    },
+    {
+      "block_number": 61,
+      "num_txns": 207,
+      "target_density": 0.2,
+      "realized_density": 0.19942779419351814,
+      "knob_value": 1.0078125
+    },
+    {
+      "block_number": 62,
+      "num_txns": 1497,
+      "target_density": 0.03,
+      "realized_density": 0.029351930241945566,
+      "knob_value": 0.87109375
+    },
+    {
+      "block_number": 63,
+      "num_txns": 680,
+      "target_density": 0.03,
+      "realized_density": 0.02937278003985099,
+      "knob_value": 0.87890625
+    },
+    {
+      "block_number": 64,
+      "num_txns": 1298,
+      "target_density": 0.01,
+      "realized_density": 0.010386657368610507,
+      "knob_value": 0.8125
+    },
+    {
+      "block_number": 65,
+      "num_txns": 337,
+      "target_density": 0.01,
+      "realized_density": 0.010244453864631907,
+      "knob_value": 0.828125
+    },
+    {
+      "block_number": 66,
+      "num_txns": 493,
+      "target_density": 0.01,
+      "realized_density": 0.009894622272794735,
+      "knob_value": 0.796875
+    },
+    {
+      "block_number": 67,
+      "num_txns": 1200,
+      "target_density": 0.6,
+      "realized_density": 0.6133194328607172,
+      "knob_value": 1.15625
+    },
+    {
+      "block_number": 68,
+      "num_txns": 773,
+      "target_density": 0.1,
+      "realized_density": 0.097379833633847,
+      "knob_value": 0.9453125
+    },
+    {
+      "block_number": 69,
+      "num_txns": 854,
+      "target_density": 0.01,
+      "realized_density": 0.00969714274732244,
+      "knob_value": 0.8046875
+    },
+    {
+      "block_number": 70,
+      "num_txns": 257,
+      "target_density": 0.1,
+      "realized_density": 0.0987658073929961,
+      "knob_value": 0.9453125
+    },
+    {
+      "block_number": 71,
+      "num_txns": 413,
+      "target_density": 0.8,
+      "realized_density": 0.7811302569406897,
+      "knob_value": 1.25
+    },
+    {
+      "block_number": 72,
+      "num_txns": 56,
+      "target_density": 0.4,
+      "realized_density": 0.40844155844155844,
+      "knob_value": 1.078125
+    },
+    {
+      "block_number": 73,
+      "num_txns": 966,
+      "target_density": 0.2,
+      "realized_density": 0.19851746961456354,
+      "knob_value": 1
+    },
+    {
+      "block_number": 74,
+      "num_txns": 71,
+      "target_density": 0.003,
+      "realized_density": 0.0028169014084507044,
+      "knob_value": 0.76953125
+    },
+    {
+      "block_number": 75,
+      "num_txns": 652,
+      "target_density": 0.4,
+      "realized_density": 0.3964547227955105,
+      "knob_value": 1.078125
+    },
+    {
+      "block_number": 76,
+      "num_txns": 1173,
+      "target_density": 0.003,
+      "realized_density": 0.0030201723069402863,
+      "knob_value": 0.7607421875
+    },
+    {
+      "block_number": 77,
+      "num_txns": 1808,
+      "target_density": 0.4,
+      "realized_density": 0.41549150060482587,
+      "knob_value": 1.078125
+    },
+    {
+      "block_number": 78,
+      "num_txns": 1532,
+      "target_density": 0.1,
+      "realized_density": 0.10015297430134061,
+      "knob_value": 0.9453125
+    },
+    {
+      "block_number": 79,
+      "num_txns": 802,
+      "target_density": 0.2,
+      "realized_density": 0.19807223514248087,
+      "knob_value": 0.99609375
+    },
+    {
+      "block_number": 80,
+      "num_txns": 30,
+      "target_density": 0.001,
+      "realized_density": 0,
+      "knob_value": 0.5
+    },
+    {
+      "block_number": 81,
+      "num_txns": 447,
+      "target_density": 0.4,
+      "realized_density": 0.40699832465565156,
+      "knob_value": 1.0703125
+    },
+    {
+      "block_number": 82,
+      "num_txns": 385,
+      "target_density": 0.6,
+      "realized_density": 0.5975784632034632,
+      "knob_value": 1.125
+    },
+    {
+      "block_number": 83,
+      "num_txns": 551,
+      "target_density": 0.01,
+      "realized_density": 0.009516581422207557,
+      "knob_value": 0.8203125
+    },
+    {
+      "block_number": 84,
+      "num_txns": 456,
+      "target_density": 0.1,
+      "realized_density": 0.09896857528436476,
+      "knob_value": 0.94921875
+    },
+    {
+      "block_number": 85,
+      "num_txns": 740,
+      "target_density": 0.4,
+      "realized_density": 0.3837874410269539,
+      "knob_value": 1.078125
+    },
+    {
+      "block_number": 86,
+      "num_txns": 188,
+      "target_density": 0.6,
+      "realized_density": 0.6059278643759245,
+      "knob_value": 1.140625
+    },
+    {
+      "block_number": 87,
+      "num_txns": 478,
+      "target_density": 0.003,
+      "realized_density": 0.002868345569853425,
+      "knob_value": 0.74609375
+    },
+    {
+      "block_number": 88,
+      "num_txns": 816,
+      "target_density": 0.8,
+      "realized_density": 0.791113316492241,
+      "knob_value": 1.25
+    },
+    {
+      "block_number": 89,
+      "num_txns": 957,
+      "target_density": 0.01,
+      "realized_density": 0.010189180799482344,
+      "knob_value": 0.814453125
+    },
+    {
+      "block_number": 90,
+      "num_txns": 1413,
+      "target_density": 0.1,
+      "realized_density": 0.099495979261772,
+      "knob_value": 0.953125
+    },
+    {
+      "block_number": 91,
+      "num_txns": 66,
+      "target_density": 0.001,
+      "realized_density": 0.0009324009324009324,
+      "knob_value": 0.71875
+    },
+    {
+      "block_number": 92,
+      "num_txns": 1025,
+      "target_density": 0.01,
+      "realized_density": 0.010213414634146342,
+      "knob_value": 0.8203125
+    },
+    {
+      "block_number": 93,
+      "num_txns": 82,
+      "target_density": 0.001,
+      "realized_density": 0.0009033423667570009,
+      "knob_value": 0.6875
+    },
+    {
+      "block_number": 94,
+      "num_txns": 1676,
+      "target_density": 0.6,
+      "realized_density": 0.6151098920671108,
+      "knob_value": 1.15625
+    },
+    {
+      "block_number": 95,
+      "num_txns": 97,
+      "target_density": 0.2,
+      "realized_density": 0.20532646048109965,
+      "knob_value": 1.01953125
+    },
+    {
+      "block_number": 96,
+      "num_txns": 1904,
+      "target_density": 0.6,
+      "realized_density": 0.6143329638739363,
+      "knob_value": 1.15625
+    },
+    {
+      "block_number": 97,
+      "num_txns": 137,
+      "target_density": 0.001,
+      "realized_density": 0.0009660798626019751,
+      "knob_value": 0.70703125
+    },
+    {
+      "block_number": 98,
+      "num_txns": 782,
+      "target_density": 0.003,
+      "realized_density": 0.00295050938039303,
+      "knob_value": 0.7578125
+    },
+    {
+      "block_number": 99,
+      "num_txns": 506,
+      "target_density": 0.03,
+      "realized_density": 0.029843853950612453,
+      "knob_value": 0.875
+    },
+    {
+      "block_number": 100,
+      "num_txns": 1247,
+      "target_density": 0.003,
+      "realized_density": 0.0028884732668195,
+      "knob_value": 0.75390625
+    },
+    {
+      "block_number": 101,
+      "num_txns": 864,
+      "target_density": 0.6,
+      "realized_density": 0.5864045534526415,
+      "knob_value": 1.15625
+    },
+    {
+      "block_number": 102,
+      "num_txns": 85,
+      "target_density": 0.003,
+      "realized_density": 0.0030812324929971988,
+      "knob_value": 0.77099609375
+    },
+    {
+      "block_number": 103,
+      "num_txns": 594,
+      "target_density": 0.003,
+      "realized_density": 0.002901414368530726,
+      "knob_value": 0.78125
+    },
+    {
+      "block_number": 104,
+      "num_txns": 5,
+      "target_density": 0.8,
+      "realized_density": 0.8,
+      "knob_value": 1.1875
+    },
+    {
+      "block_number": 105,
+      "num_txns": 881,
+      "target_density": 0.2,
+      "realized_density": 0.20711226911567435,
+      "knob_value": 1.0078125
+    },
+    {
+      "block_number": 106,
+      "num_txns": 77,
+      "target_density": 0.1,
+      "realized_density": 0.09432672590567327,
+      "knob_value": 0.95697021484375
+    },
+    {
+      "block_number": 107,
+      "num_txns": 284,
+      "target_density": 0.001,
+      "realized_density": 0.0009704872343602249,
+      "knob_value": 0.71875
+    },
+    {
+      "block_number": 108,
+      "num_txns": 941,
+      "target_density": 0.001,
+      "realized_density": 0.0010061726999344293,
+      "knob_value": 0.69140625
+    },
+    {
+      "block_number": 109,
+      "num_txns": 1126,
+      "target_density": 0.6,
+      "realized_density": 0.6211075587132425,
+      "knob_value": 1.15625
+    },
+    {
+      "block_number": 110,
+      "num_txns": 42,
+      "target_density": 0.001,
+      "realized_density": 0.0011614401858304297,
+      "knob_value": 0.625
+    },
+    {
+      "block_number": 111,
+      "num_txns": 1482,
+      "target_density": 0.001,
+      "realized_density": 0.0009586111437634235,
+      "knob_value": 0.703125
+    },
+    {
+      "block_number": 112,
+      "num_txns": 714,
+      "target_density": 0.1,
+      "realized_density": 0.09975210280465623,
+      "knob_value": 0.953125
+    },
+    {
+      "block_number": 113,
+      "num_txns": 50,
+      "target_density": 0.1,
+      "realized_density": 0.09551020408163265,
+      "knob_value": 0.9609375
+    },
+    {
+      "block_number": 114,
+      "num_txns": 38,
+      "target_density": 0.4,
+      "realized_density": 0.3883357041251778,
+      "knob_value": 1.0625
+    },
+    {
+      "block_number": 115,
+      "num_txns": 600,
+      "target_density": 0.6,
+      "realized_density": 0.5950473010573177,
+      "knob_value": 1.15625
+    },
+    {
+      "block_number": 116,
+      "num_txns": 988,
+      "target_density": 0.8,
+      "realized_density": 0.7988280849423066,
+      "knob_value": 1.25
+    },
+    {
+      "block_number": 117,
+      "num_txns": 698,
+      "target_density": 0.001,
+      "realized_density": 0.0009537395222258307,
+      "knob_value": 0.703125
+    },
+    {
+      "block_number": 118,
+      "num_txns": 21,
+      "target_density": 0.03,
+      "realized_density": 0.03333333333333333,
+      "knob_value": 0.9140625
+    },
+    {
+      "block_number": 119,
+      "num_txns": 654,
+      "target_density": 0.001,
+      "realized_density": 0.0010021964023959051,
+      "knob_value": 0.703125
+    },
+    {
+      "block_number": 120,
+      "num_txns": 28,
+      "target_density": 0.6,
+      "realized_density": 0.6190476190476191,
+      "knob_value": 1.125
+    },
+    {
+      "block_number": 121,
+      "num_txns": 125,
+      "target_density": 0.8,
+      "realized_density": 0.8299354838709677,
+      "knob_value": 1.3125
+    },
+    {
+      "block_number": 122,
+      "num_txns": 93,
+      "target_density": 0.01,
+      "realized_density": 0.010285179990649837,
+      "knob_value": 0.828125
+    },
+    {
+      "block_number": 123,
+      "num_txns": 918,
+      "target_density": 0.1,
+      "realized_density": 0.09508604120189212,
+      "knob_value": 0.943359375
+    },
+    {
+      "block_number": 124,
+      "num_txns": 1366,
+      "target_density": 0.03,
+      "realized_density": 0.02898117012319062,
+      "knob_value": 0.8671875
+    },
+    {
+      "block_number": 125,
+      "num_txns": 59,
+      "target_density": 0.8,
+      "realized_density": 0.8170660432495617,
+      "knob_value": 1.25
+    },
+    {
+      "block_number": 126,
+      "num_txns": 1859,
+      "target_density": 0.8,
+      "realized_density": 0.8065432125215184,
+      "knob_value": 1.25
+    },
+    {
+      "block_number": 127,
+      "num_txns": 726,
+      "target_density": 0.01,
+      "realized_density": 0.010392324498907571,
+      "knob_value": 0.818359375
+    },
+    {
+      "block_number": 128,
+      "num_txns": 791,
+      "target_density": 0.4,
+      "realized_density": 0.40951527468834514,
+      "knob_value": 1.078125
+    },
+    {
+      "block_number": 129,
+      "num_txns": 894,
+      "target_density": 0.001,
+      "realized_density": 0.0010471702603646056,
+      "knob_value": 0.7265625
+    },
+    {
+      "block_number": 130,
+      "num_txns": 924,
+      "target_density": 0.003,
+      "realized_density": 0.0030415593795875486,
+      "knob_value": 0.7734375
+    },
+    {
+      "block_number": 131,
+      "num_txns": 79,
+      "target_density": 0.03,
+      "realized_density": 0.029211295034079845,
+      "knob_value": 0.875
+    },
+    {
+      "block_number": 132,
+      "num_txns": 363,
+      "target_density": 0.001,
+      "realized_density": 0.0009740803311873126,
+      "knob_value": 0.703125
+    },
+    {
+      "block_number": 133,
+      "num_txns": 666,
+      "target_density": 0.1,
+      "realized_density": 0.10270721849669218,
+      "knob_value": 0.953125
+    },
+    {
+      "block_number": 134,
+      "num_txns": 291,
+      "target_density": 0.1,
+      "realized_density": 0.10314018248607655,
+      "knob_value": 0.9375
+    },
+    {
+      "block_number": 135,
+      "num_txns": 106,
+      "target_density": 0.03,
+      "realized_density": 0.031446540880503145,
+      "knob_value": 0.859375
+    },
+    {
+      "block_number": 136,
+      "num_txns": 91,
+      "target_density": 0.6,
+      "realized_density": 0.5768009768009768,
+      "knob_value": 1.109375
+    },
+    {
+      "block_number": 137,
+      "num_txns": 1586,
+      "target_density": 0.8,
+      "realized_density": 0.7847546155039562,
+      "knob_value": 1.25
+    },
+    {
+      "block_number": 138,
+      "num_txns": 61,
+      "target_density": 0.6,
+      "realized_density": 0.5770491803278689,
+      "knob_value": 1.125
+    },
+    {
+      "block_number": 139,
+      "num_txns": 1407,
+      "target_density": 0.4,
+      "realized_density": 0.4011693210436337,
+      "knob_value": 1.078125
+    },
+    {
+      "block_number": 140,
+      "num_txns": 45,
+      "target_density": 0.2,
+      "realized_density": 0.20707070707070707,
+      "knob_value": 0.984375
+    },
+    {
+      "block_number": 141,
+      "num_txns": 847,
+      "target_density": 0.8,
+      "realized_density": 0.8088595264610738,
+      "knob_value": 1.25
+    },
+    {
+      "block_number": 142,
+      "num_txns": 1088,
+      "target_density": 0.2,
+      "realized_density": 0.19754856864548948,
+      "knob_value": 1
+    },
+    {
+      "block_number": 143,
+      "num_txns": 7,
+      "target_density": 0.1,
+      "realized_density": 0.09523809523809523,
+      "knob_value": 1.0078125
+    },
+    {
+      "block_number": 144,
+      "num_txns": 22,
+      "target_density": 0.8,
+      "realized_density": 0.7878787878787878,
+      "knob_value": 1.21875
+    },
+    {
+      "block_number": 145,
+      "num_txns": 19,
+      "target_density": 0.03,
+      "realized_density": 0.029239766081871343,
+      "knob_value": 0.8671875
+    },
+    {
+      "block_number": 146,
+      "num_txns": 723,
+      "target_density": 0.003,
+      "realized_density": 0.0029693145289517745,
+      "knob_value": 0.76171875
+    },
+    {
+      "block_number": 147,
+      "num_txns": 689,
+      "target_density": 0.6,
+      "realized_density": 0.6271390960947784,
+      "knob_value": 1.15625
+    },
+    {
+      "block_number": 148,
+      "num_txns": 640,
+      "target_density": 0.2,
+      "realized_density": 0.20532570422535212,
+      "knob_value": 1
+    },
+    {
+      "block_number": 149,
+      "num_txns": 87,
+      "target_density": 0.1,
+      "realized_density": 0.10398289227479283,
+      "knob_value": 0.951171875
+    },
+    {
+      "block_number": 150,
+      "num_txns": 330,
+      "target_density": 0.4,
+      "realized_density": 0.39681311596205215,
+      "knob_value": 1.0625
+    },
+    {
+      "block_number": 151,
+      "num_txns": 193,
+      "target_density": 0.01,
+      "realized_density": 0.009553108808290155,
+      "knob_value": 0.8203125
+    },
+    {
+      "block_number": 152,
+      "num_txns": 1186,
+      "target_density": 0.1,
+      "realized_density": 0.10235874228872713,
+      "knob_value": 0.953125
+    },
+    {
+      "block_number": 153,
+      "num_txns": 835,
+      "target_density": 0.6,
+      "realized_density": 0.6254799753011961,
+      "knob_value": 1.15625
+    },
+    {
+      "block_number": 154,
+      "num_txns": 153,
+      "target_density": 0.2,
+      "realized_density": 0.20872033023735811,
+      "knob_value": 0.9921875
+    },
+    {
+      "block_number": 155,
+      "num_txns": 998,
+      "target_density": 0.1,
+      "realized_density": 0.0980798105740066,
+      "knob_value": 0.94140625
+    },
+    {
+      "block_number": 156,
+      "num_txns": 97,
+      "target_density": 0.4,
+      "realized_density": 0.40313573883161513,
+      "knob_value": 1.0703125
+    },
+    {
+      "block_number": 157,
+      "num_txns": 980,
+      "target_density": 0.03,
+      "realized_density": 0.0294844802067916,
+      "knob_value": 0.859375
+    },
+    {
+      "block_number": 158,
+      "num_txns": 751,
+      "target_density": 0.2,
+      "realized_density": 0.2048965823346649,
+      "knob_value": 1
+    },
+    {
+      "block_number": 159,
+      "num_txns": 15,
+      "target_density": 0.01,
+      "realized_density": 0.009523809523809525,
+      "knob_value": 0.78125
+    },
+    {
+      "block_number": 160,
+      "num_txns": 1959,
+      "target_density": 0.001,
+      "realized_density": 0.000997465405469948,
+      "knob_value": 0.70703125
+    },
+    {
+      "block_number": 161,
+      "num_txns": 532,
+      "target_density": 0.6,
+      "realized_density": 0.6130439092080484,
+      "knob_value": 1.140625
+    },
+    {
+      "block_number": 162,
+      "num_txns": 937,
+      "target_density": 0.4,
+      "realized_density": 0.4075974422826077,
+      "knob_value": 1.078125
+    },
+    {
+      "block_number": 163,
+      "num_txns": 267,
+      "target_density": 0.003,
+      "realized_density": 0.0030694714313874573,
+      "knob_value": 0.7109375
+    },
+    {
+      "block_number": 164,
+      "num_txns": 1757,
+      "target_density": 0.1,
+      "realized_density": 0.09765493833322746,
+      "knob_value": 0.9453125
+    },
+    {
+      "block_number": 165,
+      "num_txns": 245,
+      "target_density": 0.6,
+      "realized_density": 0.5857142857142857,
+      "knob_value": 1.125
+    },
+    {
+      "block_number": 166,
+      "num_txns": 226,
+      "target_density": 0.01,
+      "realized_density": 0.0095968534906588,
+      "knob_value": 0.828125
+    },
+    {
+      "block_number": 167,
+      "num_txns": 1650,
+      "target_density": 0.4,
+      "realized_density": 0.4100314240035283,
+      "knob_value": 1.078125
+    },
+    {
+      "block_number": 168,
+      "num_txns": 1711,
+      "target_density": 0.01,
+      "realized_density": 0.009549492277352255,
+      "knob_value": 0.8125
+    },
+    {
+      "block_number": 169,
+      "num_txns": 155,
+      "target_density": 0.003,
+      "realized_density": 0.003016338500209468,
+      "knob_value": 0.77490234375
+    },
+    {
+      "block_number": 170,
+      "num_txns": 1439,
+      "target_density": 0.001,
+      "realized_density": 0.0010235434319730225,
+      "knob_value": 0.71484375
+    },
+    {
+      "block_number": 171,
+      "num_txns": 31,
+      "target_density": 0.01,
+      "realized_density": 0.010752688172043012,
+      "knob_value": 0.8359375
+    },
+    {
+      "block_number": 172,
+      "num_txns": 303,
+      "target_density": 0.2,
+      "realized_density": 0.19594343540314296,
+      "knob_value": 1
+    },
+    {
+      "block_number": 173,
+      "num_txns": 538,
+      "target_density": 0.001,
+      "realized_density": 0.001045322700116993,
+      "knob_value": 0.73828125
+    },
+    {
+      "block_number": 174,
+      "num_txns": 396,
+      "target_density": 0.4,
+      "realized_density": 0.40516557984912416,
+      "knob_value": 1.078125
+    },
+    {
+      "block_number": 175,
+      "num_txns": 16,
+      "target_density": 0.003,
+      "realized_density": 0,
+      "knob_value": 0.5
+    },
+    {
+      "block_number": 176,
+      "num_txns": 83,
+      "target_density": 0.03,
+      "realized_density": 0.02909197766676462,
+      "knob_value": 0.875
+    },
+    {
+      "block_number": 177,
+      "num_txns": 4,
+      "target_density": 0.001,
+      "realized_density": 0,
+      "knob_value": 0.5
+    },
+    {
+      "block_number": 178,
+      "num_txns": 486,
+      "target_density": 0.001,
+      "realized_density": 0.0010266853336727334,
+      "knob_value": 0.7109375
+    },
+    {
+      "block_number": 179,
+      "num_txns": 52,
+      "target_density": 0.003,
+      "realized_density": 0.0030165912518853697,
+      "knob_value": 0.7578125
+    }
+  ]
+}
