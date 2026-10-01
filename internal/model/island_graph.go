@@ -1,13 +1,15 @@
 package model
 
-import (
-	"runtime"
-	"sync/atomic"
-)
+import "runtime"
 
 // Edge is a conflict between two transaction indices
 type Edge struct {
 	TxnA, TxnB uint32
+}
+
+// IslandSpan is one parallel work unit: rows [Lo, Hi) of island Island.
+type IslandSpan struct {
+	Island, Lo, Hi uint32
 }
 
 // BlockTopology is the "Masked Island" output plus all reusable memory
@@ -57,9 +59,12 @@ type BlockTopology struct {
 	rootCache     []uint32 // txn -> root, valid only inside GroupIslands
 	txnArena      []uint32 // txn indices grouped by island
 
-	// Per-worker scratch vectors (BucketSize words, kept zeroed between uses).
+	// Parallel work units of the per-island phase (see IslandSpan).
+	WorkUnits []IslandSpan
+
+	// Per-worker scratch vectors (BucketSize words, kept zeroed between uses),
+	// indexed by the worker index concurrency.ParallelFor hands out.
 	WorkerVecs [][]uint64
-	slotCtr    atomic.Uint32
 }
 
 // NewBlockTopology allocates the per-worker buffers once. The block-sized
@@ -153,17 +158,6 @@ func growU32(s []uint32, need int) []uint32 {
 		return make([]uint32, need)
 	}
 	return s[:need]
-}
-
-// ResetSlots must be called before each parallel phase so workers can claim
-// their private scratch slot via NextSlot.
-func (topo *BlockTopology) ResetSlots() {
-	topo.slotCtr.Store(0)
-}
-
-// NextSlot hands a worker goroutine its private scratch index.
-func (topo *BlockTopology) NextSlot() uint32 {
-	return topo.slotCtr.Add(1) - 1
 }
 
 func (topo *BlockTopology) InitUnionFind(n uint32) {

@@ -1,9 +1,9 @@
 """Plots benchmark_results.json (show_results.py prints the same data as text).
 
 Figure 1 - execution time vs block size, one panel per trace in a 2x3 grid.
-           Shared log x (1-2000 txns) shows where each trace sits in the size
-           space, from Sui's tiny checkpoints to 2000-txn synthetic blocks;
-           shared log y makes equal vertical gaps equal speed ratios. Dots =
+           Each panel has its own log x axis fitted to its trace's sizes (Sui's
+           2-44 txns stay readable next to 2000-txn synthetic blocks); shared
+           log y makes equal vertical gaps equal speed ratios. Dots =
            raw blocks, line = median per log-spaced size bin, band = 5th-95th
            percentile of the bin. Empty blocks (0 txns) are left out.
 Figure 2 - synthetic contention sweep: median time vs realized density for
@@ -17,6 +17,7 @@ from collections import defaultdict
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.ticker import LogLocator, MaxNLocator, NullFormatter, ScalarFormatter
 
 from show_results import (BASELINE, DENSITY_LEVELS, SIZE_BANDS, SYNTHETIC, TRACES,
                           algorithms_in, load_by_trace, nearest_level, parse_ms)
@@ -71,8 +72,19 @@ def plot_empty_panel(ax, title):
             ha="center", va="center", color=MUTED, fontsize=11)
 
 
+def use_own_log_x(ax):
+    """Log x axis fitted to the panel's own data (call after plotting), ticked
+    at 1-2-5 steps, or at round linear steps when it spans under a decade."""
+    ax.set_xscale("log")
+    low, high = ax.get_xlim()
+    narrow = low > 0 and high / low < 10
+    ax.xaxis.set_major_locator(MaxNLocator(5) if narrow else LogLocator(subs=(1, 2, 5)))
+    ax.xaxis.set_major_formatter(ScalarFormatter())
+    ax.xaxis.set_minor_formatter(NullFormatter())
+
+
 def figure_by_size(by_trace, algs, colors):
-    fig, axes = plt.subplots(2, 3, figsize=(17, 9.5), sharex=True, sharey=True)
+    fig, axes = plt.subplots(2, 3, figsize=(17, 9.5), sharey=True)
     for ax, (label, title) in zip(axes.flat, TRACES):
         blocks = by_trace.get(label, [])
         ax.set_title(title if not blocks else f"{title}  ({len(blocks)} blocks)", fontsize=12)
@@ -81,11 +93,9 @@ def figure_by_size(by_trace, algs, colors):
         else:
             plot_empty_panel(ax, title)
         ax.grid(True, linestyle="--", alpha=0.35)
-    axes[0, 0].set_yscale("log")
-    axes[0, 0].set_xscale("log")
-    axes[0, 0].set_xlim(1, 2500)
-    for ax in axes[1]:
+        use_own_log_x(ax)
         ax.set_xlabel("Block size (transactions, log)")
+    axes[0, 0].set_yscale("log")
     for ax in axes[:, 0]:
         ax.set_ylabel("Time per block (ms, log)")
     add_shared_legend(fig, axes, "Median line, 5th-95th percentile band, raw blocks as dots")
@@ -93,7 +103,7 @@ def figure_by_size(by_trace, algs, colors):
 
 
 def figure_contention(by_trace, algs, colors):
-    fig, axes = plt.subplots(2, 3, figsize=(17, 9.5), sharex=True, sharey=True)
+    fig, axes = plt.subplots(2, 3, figsize=(17, 9.5), sharey=True)
     for row, label in zip(axes, SYNTHETIC):
         blocks = by_trace.get(label, [])
         for ax, (lo, hi) in zip(row, SIZE_BANDS):
@@ -112,10 +122,10 @@ def figure_contention(by_trace, algs, colors):
                     if cell:
                         points.append((lvl, np.median(cell)))
                 ax.plot(*zip(*points), color=colors[alg], linewidth=2, marker="o", markersize=5, label=alg)
-    axes[0, 0].set_xscale("log")
-    axes[0, 0].set_yscale("log")
-    for ax in axes[1]:
+    for ax in axes.flat:
+        ax.set_xscale("log")
         ax.set_xlabel("Realized density = conflict edges / all pairs (log)")
+    axes[0, 0].set_yscale("log")
     for ax in axes[:, 0]:
         ax.set_ylabel("Median time per block (ms, log)")
     add_shared_legend(fig, axes, "Blocks grouped by nearest target density level")

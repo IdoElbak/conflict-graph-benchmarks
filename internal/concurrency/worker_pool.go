@@ -3,27 +3,33 @@ package concurrency
 import (
 	"runtime"
 	"sync"
+	"sync/atomic"
 )
 
-// Task defines the signature for a worker function that consumes transaction indices from a channel
-type Task func(jobs <-chan int)
+// ParallelFor runs body over the units [0, total), split into chunks of
+// chunkSize units that GOMAXPROCS workers claim through one atomic counter:
+// coordination costs one atomic add per chunk, not a channel operation per
+// unit, and nothing is allocated per unit. The calling goroutine is worker 0,
+// so only the other workers are spawned. body receives its worker index, in
+// [0, GOMAXPROCS), for private scratch, and the half-open chunk [lo, hi).
+// Results must not depend on which worker runs a chunk.
+func ParallelFor(total, chunkSize int, body func(worker, lo, hi int)) {
+	numWorkers := min(runtime.GOMAXPROCS(0), (total+chunkSize-1)/chunkSize)
+	var next atomic.Int64
+	work := func(worker int) {
+		for {
+			lo := int(next.Add(int64(chunkSize))) - chunkSize
+			if lo >= total {
+				return
+			}
+			body(worker, lo, min(lo+chunkSize, total))
+		}
+	}
 
-// ParallelRun orchestrates a fixed-size worker pool to execute a task across all available logical cores
-func ParallelRun(totalTasks int, task Task) {
-	numWorkers := runtime.GOMAXPROCS(0)
 	var waitGroup sync.WaitGroup
-
-	jobQueue := make(chan int, totalTasks)
-
-	for index := range totalTasks {
-		jobQueue <- index
+	for worker := 1; worker < numWorkers; worker++ {
+		waitGroup.Go(func() { work(worker) })
 	}
-	close(jobQueue)
-
-	for i := 0; i < numWorkers; i++ {
-		waitGroup.Go(func() {
-			task(jobQueue)
-		})
-	}
+	work(0)
 	waitGroup.Wait()
 }

@@ -7,6 +7,18 @@ import (
 	"conflict-graph-benchmarks/internal/model"
 )
 
+// TopologyPairwiseMax is the island size at or below which Topology checks
+// pairs directly with HasConflict instead of sweeping index rows.
+const TopologyPairwiseMax = 8
+
+// TopologySequentialMax is the block size at or below which Topology runs both
+// phases inline, because starting workers costs more than it saves.
+const TopologySequentialMax uint32 = 1347
+
+// TopologySplitRows is the row-range size large sweep islands are cut into for
+// the parallel per-island phase.
+const TopologySplitRows uint32 = 16
+
 // IslandConstructionTopologyShattered is the topology-output variant of the
 // Native pipeline: instead of writing conflict bits into the global
 // ConflictGraph matrix, it produces the BlockTopology itself as the final
@@ -41,18 +53,22 @@ func IslandConstructionTopologyShattered(block *model.Block, topo *model.BlockTo
 	buildLazyIndexLocal(block, topo, rowWidth)
 
 	// 7. Per-island construction straight into each island's local matrix.
-	sequential := n <= SequentialBlockMax
+	sequential := n <= TopologySequentialMax
 	if sequential {
-		vec := topo.WorkerVecs[0]
 		for islandIdx := range topo.Islands {
-			dispatchIslandLocal(islandIdx, block, topo, vec, rowWidth)
+			dispatchIslandLocal(islandIdx, block, topo, rowWidth)
 		}
 	} else {
-		topo.ResetSlots()
-		concurrency.ParallelRun(len(topo.Islands), func(jobQueue <-chan int) {
-			vec := topo.WorkerVecs[topo.NextSlot()]
-			for islandIdx := range jobQueue {
-				dispatchIslandLocal(islandIdx, block, topo, vec, rowWidth)
+		planIslandWork(topo, TopologyPairwiseMax, TopologySplitRows)
+		concurrency.ParallelFor(len(topo.WorkUnits), 1, func(_, lo, hi int) {
+			for _, unit := range topo.WorkUnits[lo:hi] {
+				island := topo.Islands[unit.Island]
+				if len(island) > TopologyPairwiseMax {
+					processIslandSweepLocal(island, unit.Lo, unit.Hi, block, topo,
+						topo.LocalGraphs[unit.Island], topo.LocalWidths[unit.Island], rowWidth)
+				} else {
+					dispatchIslandLocal(int(unit.Island), block, topo, rowWidth)
+				}
 			}
 		})
 	}
@@ -60,17 +76,13 @@ func IslandConstructionTopologyShattered(block *model.Block, topo *model.BlockTo
 	// 8. Hub conflicts become sparse edges only — no matrix flush anywhere.
 	if len(topo.HubTouchers) > 0 {
 		if sequential {
-			vec := topo.WorkerVecs[0]
 			for _, txnIdx := range topo.HubTouchers {
-				extractHubEdges(txnIdx, block, topo, vec, rowWidth, 0)
+				extractHubEdges(txnIdx, block, topo, rowWidth, 0)
 			}
 		} else {
-			topo.ResetSlots()
-			concurrency.ParallelRun(len(topo.HubTouchers), func(jobQueue <-chan int) {
-				slot := topo.NextSlot()
-				vec := topo.WorkerVecs[slot]
-				for jobIdx := range jobQueue {
-					extractHubEdges(topo.HubTouchers[jobIdx], block, topo, vec, rowWidth, slot)
+			concurrency.ParallelFor(len(topo.HubTouchers), HubToucherChunk, func(worker, lo, hi int) {
+				for _, txnIdx := range topo.HubTouchers[lo:hi] {
+					extractHubEdges(txnIdx, block, topo, rowWidth, worker)
 				}
 			})
 		}
@@ -91,7 +103,7 @@ func IslandConstructionTopologyShattered(block *model.Block, topo *model.BlockTo
 // Hub rows are written in global coordinates because touchers span islands.
 func buildLazyIndexLocal(block *model.Block, topo *model.BlockTopology, rowWidth uint32) {
 	for _, island := range topo.Islands {
-		if len(island) <= PairwiseIslandMax {
+		if len(island) <= TopologyPairwiseMax {
 			continue
 		}
 		for localIdx, txnIdx := range island {
@@ -131,7 +143,7 @@ func buildLazyIndexLocal(block *model.Block, topo *model.BlockTopology, rowWidth
 // local-coordinate words for island rows, global-coordinate words for hub rows.
 func wipeLazyIndexLocal(block *model.Block, topo *model.BlockTopology, rowWidth uint32) {
 	for _, island := range topo.Islands {
-		if len(island) <= PairwiseIslandMax {
+		if len(island) <= TopologyPairwiseMax {
 			continue
 		}
 		for localIdx, txnIdx := range island {
@@ -170,7 +182,7 @@ func wipeLazyIndexLocal(block *model.Block, topo *model.BlockTopology, rowWidth 
 
 // dispatchIslandLocal routes one island to its cheapest construction strategy,
 // writing results into the island's own local matrix.
-func dispatchIslandLocal(islandIdx int, block *model.Block, topo *model.BlockTopology, vec []uint64, rowWidth uint32) {
+func dispatchIslandLocal(islandIdx int, block *model.Block, topo *model.BlockTopology, rowWidth uint32) {
 	island := topo.Islands[islandIdx]
 	local := topo.LocalGraphs[islandIdx]
 	if len(island) == 2 {
@@ -180,11 +192,11 @@ func dispatchIslandLocal(islandIdx int, block *model.Block, topo *model.BlockTop
 		return
 	}
 	width := topo.LocalWidths[islandIdx]
-	if len(island) <= PairwiseIslandMax {
+	if len(island) <= TopologyPairwiseMax {
 		processIslandPairwiseLocal(island, block, local, width)
 		return
 	}
-	processIslandSweepLocal(island, block, topo, local, width, vec, rowWidth)
+	processIslandSweepLocal(island, 0, uint32(len(island)), block, topo, local, width, rowWidth)
 }
 
 // processIslandPairwiseLocal runs the direct pairwise scan of a tiny island,
@@ -200,43 +212,38 @@ func processIslandPairwiseLocal(island []uint32, block *model.Block, local []uin
 	}
 }
 
-// processIslandSweepLocal sweeps each member's non-hub object rows — already in
-// local coordinates — into a conflict vector of only `width` words and stores
-// it as the member's local matrix row. Hub bits are extractHubEdges' job.
-func processIslandSweepLocal(island []uint32, block *model.Block, topo *model.BlockTopology, local []uint64, width uint32, vec []uint64, rowWidth uint32) {
-	for localIdx, txnIdx := range island {
-		txn := &block.Transactions[txnIdx]
+// processIslandSweepLocal sweeps the non-hub object rows — already in local
+// coordinates — of members [lo, hi) straight into their rows of the island's
+// local matrix (all-zero from PrepareLocalGraphs), only `width` words wide.
+// Hub bits are extractHubEdges' job.
+func processIslandSweepLocal(island []uint32, lo, hi uint32, block *model.Block, topo *model.BlockTopology, local []uint64, width uint32, rowWidth uint32) {
+	for lIdx := lo; lIdx < hi; lIdx++ {
+		row := local[lIdx*width : (lIdx+1)*width]
+		txn := &block.Transactions[island[lIdx]]
 
 		for _, objID := range txn.WriteSet {
 			if topo.IsHub[objID] {
 				continue
 			}
 			base := objID * rowWidth
-			writers := topo.WriteBits[base : base+width]
-			readers := topo.ReadBits[base : base+width]
-			for bIdx := uint32(0); bIdx < width; bIdx++ {
-				vec[bIdx] |= writers[bIdx] | readers[bIdx]
+			writers := topo.WriteBits[base:][:len(row)]
+			readers := topo.ReadBits[base:][:len(row)]
+			for bIdx := range row {
+				row[bIdx] |= writers[bIdx] | readers[bIdx]
 			}
 		}
 		for _, objID := range txn.ReadSet {
 			if topo.IsHub[objID] {
 				continue
 			}
-			base := objID * rowWidth
-			writers := topo.WriteBits[base : base+width]
-			for bIdx := uint32(0); bIdx < width; bIdx++ {
-				vec[bIdx] |= writers[bIdx]
+			writers := topo.WriteBits[objID*rowWidth:][:len(row)]
+			for bIdx := range row {
+				row[bIdx] |= writers[bIdx]
 			}
 		}
 
-		// Clear the self bit at the LOCAL position, store the row, fast-clear.
-		lIdx := uint32(localIdx)
-		vec[lIdx/model.SizeOfUint64] &= ^(model.MaskActiveBit << (lIdx % model.SizeOfUint64))
-		rowBase := lIdx * width
-		for bIdx := uint32(0); bIdx < width; bIdx++ {
-			local[rowBase+bIdx] = vec[bIdx]
-			vec[bIdx] = 0
-		}
+		// Clear the self bit at the LOCAL position.
+		row[lIdx/model.SizeOfUint64] &^= model.MaskActiveBit << (lIdx % model.SizeOfUint64)
 	}
 }
 
@@ -244,8 +251,9 @@ func processIslandSweepLocal(island []uint32, block *model.Block, topo *model.Bl
 // coordinates) and emits the upper-triangle sparse edges into the worker's
 // private hub-edge list. Unlike native's reintegration there is no matrix
 // flush — the edge list itself is the output.
-func extractHubEdges(txnIdx uint32, block *model.Block, topo *model.BlockTopology, vec []uint64, rowWidth uint32, slot uint32) {
+func extractHubEdges(txnIdx uint32, block *model.Block, topo *model.BlockTopology, rowWidth uint32, worker int) {
 	txn := &block.Transactions[txnIdx]
+	vec := topo.WorkerVecs[worker]
 
 	for _, objID := range txn.WriteSet {
 		if !topo.IsHub[objID] {
@@ -278,7 +286,7 @@ func extractHubEdges(txnIdx uint32, block *model.Block, topo *model.BlockTopolog
 		for activeBits != 0 {
 			peerIdx := basePeerIdx + uint32(bits.TrailingZeros64(activeBits))
 			if txnIdx < peerIdx {
-				topo.HubEdges[slot] = append(topo.HubEdges[slot], model.Edge{TxnA: txnIdx, TxnB: peerIdx})
+				topo.HubEdges[worker] = append(topo.HubEdges[worker], model.Edge{TxnA: txnIdx, TxnB: peerIdx})
 			}
 			activeBits &= activeBits - 1
 		}

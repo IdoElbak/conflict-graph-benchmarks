@@ -52,8 +52,9 @@ func runParsers(parsers []func() error) {
 	}
 }
 
-// processFile streams all blocks from a single blockchain, runs the test suite, and collects metrics
-func processFile(filePath string, blockchain string, manager *model.Manager, allMetrics *[]BlockMetrics, maxBlocks int) {
+// processFile streams all blocks from a single blockchain, times every selected
+// algorithm on each block, verifies parity, and collects metrics.
+func processFile(filePath string, blockchain string, manager *model.Manager, allMetrics *[]BlockMetrics, maxBlocks int, algs []algorithm) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		log.Printf(" -> [Warning] Could not open %s. Make sure digestion ran successfully.", filePath)
@@ -66,20 +67,7 @@ func processFile(filePath string, blockchain string, manager *model.Manager, all
 		log.Fatalf("JSON structural error in %s: %v", filePath, err)
 	}
 
-	graphs := map[string]*model.ConflictGraph{
-		"Bitmap":                  model.NewConflictGraph(),
-		"IslandNativeShattered":   model.NewConflictGraph(),
-		"IslandTopologyShattered": model.NewConflictGraph(), // reconstruction target for parity only
-	}
-
-	// Single preallocated topology structure reused by IslandNativeShattered
-	topology := model.NewBlockTopology()
-
-	// Separate instance for IslandTopologyShattered: its Islands/LocalGraphs/
-	// HubEdges ARE the output and must survive until the parity check, so it
-	// cannot share native's scratch (PrepareForBlock would wipe them).
-	topologyOutput := model.NewBlockTopology()
-
+	oracle := model.NewConflictGraph()
 	var block model.Block
 
 	// Variables for your trace statistics
@@ -118,11 +106,6 @@ func processFile(filePath string, blockchain string, manager *model.Manager, all
 		}
 
 		manager.Populate(&block, cleanBlock)
-		blockSize := uint32(len(block.Transactions))
-
-		for _, g := range graphs {
-			g.Reset(blockSize)
-		}
 
 		metrics := BlockMetrics{
 			Blockchain:    blockchain,
@@ -132,7 +115,7 @@ func processFile(filePath string, blockchain string, manager *model.Manager, all
 			Times:         make(map[string]string),
 		}
 
-		runAlgorithmsAndVerify(&block, graphs, &metrics, topology, topologyOutput)
+		runAlgorithmsAndVerify(&block, algs, oracle, &metrics)
 
 		*allMetrics = append(*allMetrics, metrics)
 		blocksProcessed++
@@ -187,80 +170,61 @@ const (
 	// timingRounds x iterationsPerRound calls are timed per block and algorithm.
 	timingRounds       = 5
 	iterationsPerRound = 100
+
+	// roundBudgetNanos caps one round's length: a call slower than
+	// roundBudgetNanos/iterationsPerRound (2 ms) gets fewer iterations, so the
+	// O(n²) reference algorithms stay measurable on 2000-txn blocks.
+	roundBudgetNanos = 200_000_000
 )
 
-// timeAlgorithm returns the median per-call time over timingRounds rounds of
-// iterationsPerRound calls. One untimed warm-up call and a GC come first, so
-// every algorithm starts warm and from the same heap state; the median of
-// short rounds discards rounds disturbed by an interrupt or core migration.
+// timeAlgorithm returns the median per-call time over timingRounds rounds.
+// One untimed warm-up call and a GC come first, so every algorithm starts
+// warm and from the same heap state; the median of short rounds discards
+// rounds disturbed by an interrupt or core migration.
 func timeAlgorithm(run func()) time.Duration {
+	start := nowNanos()
 	run()
+	iterations := int(min(iterationsPerRound, max(1, roundBudgetNanos/max(1, nowNanos()-start))))
 	runtime.GC()
 	var rounds [timingRounds]int64
 	for r := range rounds {
 		start := nowNanos()
-		for range iterationsPerRound {
+		for range iterations {
 			run()
 		}
-		rounds[r] = (nowNanos() - start) / iterationsPerRound
+		rounds[r] = (nowNanos() - start) / int64(iterations)
 	}
 	slices.Sort(rounds[:])
 	return time.Duration(rounds[timingRounds/2])
 }
 
-func runAlgorithmsAndVerify(block *model.Block, graphs map[string]*model.ConflictGraph, metrics *BlockMetrics, topology *model.BlockTopology, topologyOutput *model.BlockTopology) {
+// runAlgorithmsAndVerify times every algorithm on the block and checks its
+// output bit-for-bit against NaiveSequential, the definitional pairwise
+// reference, which runs untimed once per block.
+func runAlgorithmsAndVerify(block *model.Block, algs []algorithm, oracle *model.ConflictGraph, metrics *BlockMetrics) {
 	blockSize := uint32(len(block.Transactions))
 	metrics.IslandMetrics = make(map[string]IslandStat)
 
-	benchmarkAlg := func(name string, alg func(*model.Block, *model.ConflictGraph) (int, int, float64)) {
-		graph := graphs[name]
+	algorithms.NaiveSequential(block, oracle)
+
+	for _, alg := range algs {
 		var count, maxSz int
 		var avgSz float64
-
-		metrics.Times[name] = timeAlgorithm(func() {
-			graph.Reset(blockSize)
-			count, maxSz, avgSz = alg(block, graph)
-		}).String()
-
-		if count > 0 {
-			metrics.IslandMetrics[name] = IslandStat{Count: count, MaxSize: maxSz, AvgSize: avgSz}
-		}
-	}
-
-	// Run only the optimized baseline and the target algorithms
-	benchmarkAlg("Bitmap", algorithms.BitmapConstruction)
-	benchmarkAlg("IslandNativeShattered", func(b *model.Block, g *model.ConflictGraph) (int, int, float64) {
-		return algorithms.IslandConstructionNativeShattered(b, g, topology)
-	})
-
-	// IslandTopologyShattered never touches the global matrix, so its timed
-	// loop has no per-iteration graph.Reset; the reconstruction below runs
-	// untimed and only materializes the output for the parity check.
-	{
-		name := "IslandTopologyShattered"
-		var count, maxSz int
-		var avgSz float64
-		metrics.Times[name] = timeAlgorithm(func() {
-			count, maxSz, avgSz = algorithms.IslandConstructionTopologyShattered(block, topologyOutput)
+		metrics.Times[alg.name] = timeAlgorithm(func() {
+			count, maxSz, avgSz = alg.run(block)
 		}).String()
 		if count > 0 {
-			metrics.IslandMetrics[name] = IslandStat{Count: count, MaxSize: maxSz, AvgSize: avgSz}
+			metrics.IslandMetrics[alg.name] = IslandStat{Count: count, MaxSize: maxSz, AvgSize: avgSz}
 		}
-		algorithms.ReconstructTopologyGraph(topologyOutput, graphs[name])
-	}
-
-	// Use Bitmap as the deterministic source of truth
-	truthGraph := graphs["Bitmap"]
-	for name, testGraph := range graphs {
-		if name == "Bitmap" {
-			continue
+		if alg.materialize != nil {
+			alg.materialize(blockSize)
 		}
-		if !truthGraph.AreGraphsEqual(testGraph, blockSize) {
-			log.Fatalf("\n[FATAL ERROR] %s corrupted the graph on block %d!", name, metrics.BlockNumber)
+		if !oracle.AreGraphsEqual(alg.graph, blockSize) {
+			log.Fatalf("\n[FATAL ERROR] %s corrupted the graph on block %d!", alg.name, metrics.BlockNumber)
 		}
 	}
 
-	edges := truthGraph.CountEdges(blockSize)
+	edges := oracle.CountEdges(blockSize)
 	maxEdges := (blockSize * (blockSize - 1)) / 2
 	var density float64 = 0
 	if maxEdges > 0 {
@@ -269,7 +233,7 @@ func runAlgorithmsAndVerify(block *model.Block, graphs map[string]*model.Conflic
 
 	metrics.TotalEdges = edges
 	metrics.Density = density
-	metrics.ConflictedTxns = conflictedTxnsRatio(truthGraph, blockSize)
+	metrics.ConflictedTxns = conflictedTxnsRatio(oracle, blockSize)
 }
 
 // conflictedTxnsRatio returns the fraction of transactions with at least one
@@ -278,11 +242,9 @@ func conflictedTxnsRatio(graph *model.ConflictGraph, blockSize uint32) float64 {
 	if blockSize == 0 {
 		return 0
 	}
-	rows := graph.Export(blockSize)
 	conflicted := 0
 	for i := uint32(0); i < blockSize; i++ {
-		row := rows[i*model.BucketSize : (i+1)*model.BucketSize]
-		if slices.ContainsFunc(row, func(word uint64) bool { return word != 0 }) {
+		if slices.ContainsFunc(graph.Row(i), func(word uint64) bool { return word != 0 }) {
 			conflicted++
 		}
 	}

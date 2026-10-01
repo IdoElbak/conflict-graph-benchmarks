@@ -10,18 +10,32 @@ Every file carries a `//go:build ignore` header, so nothing here is ever compile
 | `island_object_shattered.go` | `IslandConstructionObjectShattered` | First object-hub variant; fixed-width sweeps, reintegrates against all n txns. Superseded by Native. |
 | `island_dynamic_object_shattered.go` | `IslandConstructionDynamicShattered` | ObjectShattered + dynamic sweep width + toucher-only reintegration, but allocates per call. Superseded by Native. |
 
-Live variants remain in `internal/algorithms/`: `IslandConstructionNativeShattered` (frozen reference) and `IslandConstructionTopologyShattered` (champion), plus the Bitmap/naive/IDBucket baselines.
+Live variants remain in `internal/algorithms/`: `IslandConstructionNativeShattered` and `IslandConstructionTopologyShattered`, plus the Bitmap/IDBucket/naive baselines.
+
+## Phase 2 review (2026-09-28): none revived
+
+Each file was judged on its idea, not its old number:
+
+| File | Idea | Verdict |
+|---|---|---|
+| `island_naive.go` | UF + pairwise islands, no hubs | Subsumed: Native/Topology with hubs off and a large pairwise cut-off is this algorithm on the zero-allocation skeleton. |
+| `island_object_shattered.go` | object hubs, sweep islands | Subsumed by Native (same idea, allocation-free implementation). |
+| `island_dynamic_object_shattered.go` | + live-width sweeps, toucher-only reintegration | Subsumed by Native. |
+| `island_txn_shattered.go` | hubs on the *transaction* axis | A distinct hub heuristic, not a distinct construction algorithm: evaluate it as a Phase 4 heuristic on the Topology skeleton. |
 
 ## Reviving a file
 
-1. Move it up one directory (back into `internal/algorithms/`).
-2. Delete the `//go:build ignore` line and the blank line after it.
-3. Note: `ObjectHubThreshold` now lives in `island_shared.go` (shared with the live family) —
-   `island_object_shattered.go` and `island_dynamic_object_shattered.go` compile against it as-is.
-   `TxnHubThreshold` and `LargeIslandThreshold` travel inside their archived files.
-4. The shared helpers these files call (`populateIDBucket`, `countObjectAccesses`,
-   `partitionViaStarTopology`, `partitionViaInvertedIndex`, `groupValidIslands`,
-   `processSingleIsland`, `CalculateIslandStats`) still exist in the live package.
-5. Re-register in `pipeline_utils.go`: add the name to the `graphs` map, add a
-   `benchmarkAlg(...)` call in `runAlgorithmsAndVerify`, and (optionally) add the name to
-   the island-stats print list in `processFile`.
+Revival is no longer a plain file move. Phase 2 removed what these files were
+written against: `concurrency.ParallelRun` (now `concurrency.ParallelFor`),
+the fixed 47-word `model.BucketSize` rows of `ConflictGraph` and
+`ObjectInvertedIndex` (both are sized to the live block now), and the
+archive-only helpers `populateIDBucket`, `countObjectAccesses`,
+`buildMasterIndex`, `partitionViaStarTopology`, `partitionViaInvertedIndex`
+and `groupValidIslands` (they are in git history, commit `c9fdd2b`). A revived
+variant must be ported to the Phase 2 standard anyway: reusable scratch, no
+allocation per call, live-sized rows, `ParallelFor` with a sequential threshold.
+
+1. Move the file up one directory (back into `internal/algorithms/`) and delete
+   the `//go:build ignore` line.
+2. Port it as above.
+3. Register it in `newAlgorithms` in `main.go`.

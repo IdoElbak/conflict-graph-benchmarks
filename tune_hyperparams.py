@@ -1,38 +1,43 @@
-"""Hyperparameter grid search for the conflict-graph algorithms.
+"""Short hyperparameter tuning pass for every benchmarked algorithm.
 
-Tunes the three live compile-time constants (all in island_shared.go since the
-2026-07-18 cleanup):
-  - PairwiseIslandMax   - native + topology
-  - SequentialBlockMax  - native + topology
-  - ObjectHubThreshold  - all island algorithms
+One command, resumable, re-runnable on other hardware:
+    python tune_hyperparams.py            run / resume, then write the winners into the sources
+    python tune_hyperparams.py --plan     list the runs of the current stage
+    python tune_hyperparams.py --report   print the choices from saved results
+    python tune_hyperparams.py --check    verify every knob regex matches its source once
 
-Pipeline per grid point (exactly as specified):
-  1. rewrite the const literals in the two Go files
-  2. go clean -cache
-  3. delete benchmark_results.json
-  4. go run .           (full benchmark, includes bit-for-bit parity check)
-  5. summarize benchmark_results.json into tuning_results.json (crash-safe)
-  6. sleep 3 minutes to let the CPU cool down
+Each run rewrites the knob literals in the Go sources, runs `go run . -algs=...`
+(full benchmark on all six traces, parity-verified against NaiveSequential)
+and stores every per-block time plus the run's [Platform] line in
+tuning_results.json. Every algorithm has its own knobs and one algorithm's
+knobs never change another's timing, so one run can test a different value
+for each algorithm at once.
 
-Phases:
-  Phase 0: very wide one-factor-at-a-time scans + a coarse full factorial.
-  Phase 1..N (REFINE_ROUNDS): once the previous phase is fully done, a finer
-  3x3x3 lattice is generated around the best config found so far (geometric
-  midpoints toward the neighboring tested values on each axis). Deterministic,
-  so Ctrl+C + rerun always resumes exactly where it left off.
+Stages (each derived only from the results before it, so a rerun resumes):
+  1. parallel runs: every sequential threshold 0 (always parallel), one run per
+     chunk size; sequential runs: every threshold at the maximum, one run per
+     island pairwise cut-off (the non-island algorithms repeat, which measures
+     run-to-run noise).
+  2. per algorithm: best chunk, best pairwise cut-off, and the sequential
+     threshold chosen block by block from the parallel vs sequential times;
+     then a coarse hub-threshold scan for the island algorithms.
+  3. validation run of the chosen config plus neighbour runs (thresholds x0.5
+     and x2, pairwise cut-offs between the tested values); a neighbour replaces
+     the stage-2 value only if it wins by more than NOISE_MARGIN against a run
+     with the same mix of algorithms.
+Score of an algorithm in a run = geometric mean over the six traces of the
+geometric mean per-block time (every trace and every block weigh the same).
+The winners are written into the sources at the end (--no-apply to skip).
 
-Already-completed configs (keyed by parameter triple) are skipped on rerun.
-The tuned in-code constants (64 / 3000 / 10**9, the 2026-07-11 grid-search
-winner) are always restored on exit, including on Ctrl+C or crash.
-
-Usage:
-  python tune_hyperparams.py            run / resume the search
-  python tune_hyperparams.py --plan     list pending configs without running
-  python tune_hyperparams.py --report   print the leaderboard from saved results
-  python tune_hyperparams.py --check    verify the const regexes match the sources
+Known limitation (Phase 2, 2026-09-28): the sequential thresholds come from
+comparing different runs, and on the development laptop parallel code drifted
+~25-35% more than sequential code between runs, biasing the thresholds
+towards "sequential". The shipped thresholds were re-measured paired (both
+modes back to back on every block in one process); see ALGORITHMS.md.
 """
 
 import argparse
+import bisect
 import json
 import math
 import os
@@ -46,266 +51,326 @@ from datetime import datetime
 REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 RESULTS_FILE = os.path.join(REPO_DIR, "tuning_results.json")
 BENCH_FILE = os.path.join(REPO_DIR, "benchmark_results.json")
+ALG_DIR = os.path.join(REPO_DIR, "internal", "algorithms")
 
-SHARED_GO = os.path.join(REPO_DIR, "internal", "algorithms", "island_shared.go")
+TRACES = ["Ethereum", "EthereumNoHub", "Solana", "Sui", "YCSB", "TPC"]
+MAX_THRESHOLD = 3000  # = model.MaximumGraphSize: "always sequential"
+HUB_OFF = 10**9
 
-# (file, regex-with-one-capture-group-for-the-prefix) per parameter.
-CONST_PATTERNS = {
-    "PairwiseIslandMax": (SHARED_GO, re.compile(r"(const PairwiseIslandMax = )\d+")),
-    "SequentialBlockMax": (SHARED_GO, re.compile(r"(const SequentialBlockMax uint32 = )\d+")),
-    "ObjectHubThreshold": (SHARED_GO, re.compile(r"(const ObjectHubThreshold uint32 = )\d+")),
+# knob -> (file, regex with one capture group for the prefix)
+KNOBS = {}
+for _file, _names in {
+    "bitmap.go": ["BitmapSequentialMax", "BitmapChunkRows"],
+    "id_bucket_construction.go": ["IDBucketSequentialMax", "IDBucketChunkRows"],
+    "naive_parallel.go": ["NaiveParallelSequentialMax", "NaiveParallelChunkRows"],
+    "island_native_shattered.go": ["NativePairwiseMax", "NativeSequentialMax", "NativeSplitRows"],
+    "island_topology_shattered.go": ["TopologyPairwiseMax", "TopologySequentialMax", "TopologySplitRows"],
+    "island_shared.go": ["ObjectHubThreshold"],
+}.items():
+    for _name in _names:
+        KNOBS[_name] = (os.path.join(ALG_DIR, _file),
+                        re.compile(r"(const " + _name + r"(?: uint32)? = )\d+"))
+
+# Benchmark names and their knobs.
+ALGS = {
+    "Bitmap": {"seq": "BitmapSequentialMax", "chunk": "BitmapChunkRows"},
+    "IDBucket": {"seq": "IDBucketSequentialMax", "chunk": "IDBucketChunkRows"},
+    "NaiveParallel": {"seq": "NaiveParallelSequentialMax", "chunk": "NaiveParallelChunkRows"},
+    "IslandNativeShattered": {"seq": "NativeSequentialMax", "pw": "NativePairwiseMax",
+                              "chunk": "NativeSplitRows"},
+    "IslandTopologyShattered": {"seq": "TopologySequentialMax", "pw": "TopologyPairwiseMax",
+                                "chunk": "TopologySplitRows"},
 }
+ISLAND_ALGS = ["IslandNativeShattered", "IslandTopologyShattered"]
+ROW_ALGS = ["Bitmap", "IDBucket"]
 
-# Restored on every exit; must stay in sync with the tuned in-code values,
-# otherwise a tuning session silently downgrades the sources it touched.
-BASELINE = {"PairwiseIslandMax": 64, "SequentialBlockMax": 3000, "ObjectHubThreshold": 10**9}
+ROW_CHUNKS = [16, 64, 256]
+NAIVE_CHUNKS = [2, 8, 32]
+PAIRWISE = [64, 2, 4, 8, 16, 24, 32, 48]
+HUBS = [20, 50, 150, 500, 2000]
 
-ALGORITHMS = [
-    "Bitmap",
-    "IslandNativeShattered",
-    "IslandTopologyShattered",
-]
+GO_RUN_TIMEOUT_SEC = 3 * 3600
 
-COOLDOWN_SEC = 180
-GO_RUN_TIMEOUT_SEC = 3600
-REFINE_ROUNDS = 2
-
-# Deliberately wide ranges (uint32-safe): 10**9 hub threshold means "no hubs",
-# SequentialBlockMax 0 means "always parallel", 3000 means "always sequential".
-PW_WIDE = [2, 3, 4, 6, 8, 12, 16, 24, 32, 64]
-SEQ_WIDE = [0, 64, 128, 256, 384, 512, 768, 1024, 1536, 3000]
-HUB_WIDE = [5, 10, 20, 35, 50, 75, 100, 150, 300, 10**9]
-
-PW_COARSE = [2, 6, 16, 64]
-SEQ_COARSE = [0, 384, 1024, 3000]
-HUB_COARSE = [10, 50, 150, 10**9]
+# Whole-run scores of an unchanged algorithm drift by up to ~x1.1 between runs
+# on the development laptop, so stage 3 only overrides a stage-2 choice that
+# the neighbour beats by more than this factor.
+NOISE_MARGIN = 1.05
 
 
-def config_key(cfg):
-    return f"pw={cfg['PairwiseIslandMax']}|seq={cfg['SequentialBlockMax']}|hub={cfg['ObjectHubThreshold']}"
+# --- run plan -------------------------------------------------------------------
+
+def run_spec(name, stage, config, algs):
+    return {"name": name, "stage": stage, "config": config, "algs": algs}
 
 
-def phase0_configs():
-    configs = []
-    for pw in PW_WIDE:
-        configs.append({**BASELINE, "PairwiseIslandMax": pw})
-    for seq in SEQ_WIDE:
-        configs.append({**BASELINE, "SequentialBlockMax": seq})
-    for hub in HUB_WIDE:
-        configs.append({**BASELINE, "ObjectHubThreshold": hub})
-    for pw in PW_COARSE:
-        for seq in SEQ_COARSE:
-            for hub in HUB_COARSE:
-                configs.append({
-                    "PairwiseIslandMax": pw,
-                    "SequentialBlockMax": seq,
-                    "ObjectHubThreshold": hub,
-                })
-    return dedupe(configs)
+def all_seq(value):
+    return {ALGS[a]["seq"]: value for a in ALGS}
 
 
-def dedupe(configs):
-    seen, out = set(), []
-    for cfg in configs:
-        key = config_key(cfg)
-        if key not in seen:
-            seen.add(key)
-            out.append(cfg)
-    return out
+def stage1():
+    runs = []
+    for i, (row_chunk, naive_chunk) in enumerate(zip(ROW_CHUNKS, NAIVE_CHUNKS)):
+        cfg = {**all_seq(0), "ObjectHubThreshold": HUB_OFF,
+               "BitmapChunkRows": row_chunk, "IDBucketChunkRows": row_chunk,
+               "NativeSplitRows": row_chunk, "TopologySplitRows": row_chunk,
+               "NaiveParallelChunkRows": naive_chunk,
+               "NativePairwiseMax": 64, "TopologyPairwiseMax": 64}
+        runs.append(run_spec(f"P{i}-chunk{row_chunk}/{naive_chunk}", 1, cfg, list(ALGS)))
+    for i, pw in enumerate(PAIRWISE):
+        cfg = {**all_seq(MAX_THRESHOLD), "ObjectHubThreshold": HUB_OFF,
+               "NativePairwiseMax": pw, "TopologyPairwiseMax": pw}
+        algs = ROW_ALGS + ISLAND_ALGS
+        if i == 0:
+            algs = algs + ["NaiveSequential"]  # the sequential-mode time of NaiveParallel
+        runs.append(run_spec(f"S{i}-pw{pw}", 1, cfg, algs))
+    # Interleave P and S runs so slow thermal drift hits both modes alike.
+    p_runs, s_runs = runs[:len(ROW_CHUNKS)], runs[len(ROW_CHUNKS):]
+    return [r for pair in zip(p_runs, s_runs) for r in pair] + s_runs[len(p_runs):]
 
 
-def midpoint(a, b):
-    """Geometric midpoint (log-scale friendly for the huge hub range)."""
-    if a == 0 or b == 0:
-        return (a + b) // 2
-    return int(round(math.sqrt(a * b)))
+def stage2(results):
+    choice = choose_stage1(results)
+    runs = []
+    for hub in HUBS:
+        cfg = {**choice["config"], "ObjectHubThreshold": hub}
+        runs.append(run_spec(f"H-hub{hub}", 2, cfg, ISLAND_ALGS))
+    return runs
 
 
-def refine_configs(prev_configs, results):
-    """A finer 3x3x3 lattice around the best completed config of the previous
-    phases: on each axis, the best value plus geometric midpoints toward its
-    nearest tested neighbors. Deterministic given the previous phase set."""
-    completed = [c for c in prev_configs if get_ok_result(results, c)]
-    if not completed:
-        return []
-    best = max(completed, key=lambda c: get_ok_result(results, c)["score"])
-
-    axes = {}
-    for param in BASELINE:
-        tested = sorted({c[param] for c in prev_configs})
-        val = best[param]
-        idx = tested.index(val)
-        values = {val}
-        if idx > 0:
-            values.add(midpoint(tested[idx - 1], val))
-        if idx < len(tested) - 1:
-            values.add(midpoint(val, tested[idx + 1]))
-        axes[param] = sorted(values)
-
-    configs = []
-    for pw in axes["PairwiseIslandMax"]:
-        for seq in axes["SequentialBlockMax"]:
-            for hub in axes["ObjectHubThreshold"]:
-                configs.append({
-                    "PairwiseIslandMax": pw,
-                    "SequentialBlockMax": seq,
-                    "ObjectHubThreshold": hub,
-                })
-    prev_keys = {config_key(c) for c in prev_configs}
-    return [c for c in dedupe(configs) if config_key(c) not in prev_keys]
+def stage3(results):
+    choice = choose_stage2(results)
+    cfg = choice["config"]
+    runs = [run_spec("V-chosen", 3, cfg, list(ALGS))]
+    for factor, label in ((0.5, "half"), (2, "double")):
+        scaled = {**cfg}
+        for a in ALGS:
+            knob = ALGS[a]["seq"]
+            if 0 < cfg[knob] < MAX_THRESHOLD:
+                scaled[knob] = min(MAX_THRESHOLD, max(1, int(cfg[knob] * factor)))
+        runs.append(run_spec(f"V-seq-{label}", 3, scaled, list(ALGS)))
+    runs.append(run_spec("V-pw-center", 3, cfg, ISLAND_ALGS))  # same load mix as its neighbours
+    for side in ("lower", "upper"):
+        pw_cfg = {**cfg}
+        for a in ISLAND_ALGS:
+            knob = ALGS[a]["pw"]
+            pw_cfg[knob] = pairwise_neighbour(cfg[knob], side)
+        runs.append(run_spec(f"V-pw-{side}", 3, pw_cfg, ISLAND_ALGS))
+    return runs
 
 
-def build_phases(results):
-    """Phase 0 is fixed; each refinement phase is derived only from the phases
-    before it, so the sequence is reproducible across restarts. Refinement is
-    generated only once the previous phases are fully completed."""
-    phases = [phase0_configs()]
-    for _ in range(REFINE_ROUNDS):
-        prev = [c for phase in phases for c in phase]
-        if not all(get_result(results, c) for c in prev):
-            break  # previous phase still has pending work
-        nxt = refine_configs(prev, results)
-        if not nxt:
+def pairwise_neighbour(value, side):
+    """Midpoint between value and its neighbour among the tested cut-offs."""
+    tested = sorted(set(PAIRWISE))
+    i = tested.index(value)
+    j = i - 1 if side == "lower" else i + 1
+    if j == len(tested):
+        return value * 3 // 2  # the largest tested value won: look beyond it
+    if j < 0:
+        return value
+    return (value + tested[j]) // 2
+
+
+def build_plan(results):
+    """Every stage whose inputs are complete, in order."""
+    plan = stage1()
+    for next_stage in (stage2, stage3):
+        if not all(r["name"] in results["runs"] for r in plan):
             break
-        phases.append(nxt)
-    return phases
+        plan += next_stage(results)
+    return plan
 
 
-# --- constant rewriting -----------------------------------------------------
+# --- scoring --------------------------------------------------------------------
+
+def geomean(values):
+    return math.exp(statistics.fmean(math.log(max(v, 1e-9)) for v in values))
+
+
+def score(times_by_trace):
+    """Geomean over traces of the geomean per-block time (ms)."""
+    per_trace = [geomean(t) for t in times_by_trace.values() if t]
+    return geomean(per_trace) if per_trace else float("inf")
+
+
+def run_times(results, name, alg):
+    run = results["runs"].get(name)
+    return run["times"].get(alg) if run else None
+
+
+def best_run(results, names, alg):
+    scored = [(score(run_times(results, n, alg)), n) for n in names if run_times(results, n, alg)]
+    return min(scored)[1] if scored else None
+
+
+def median_times(results, names, alg):
+    """Per-block median over several runs of the same mode."""
+    runs = [run_times(results, n, alg) for n in names if run_times(results, n, alg)]
+    return {tr: [statistics.median(vals) for vals in zip(*(r[tr] for r in runs))] for tr in runs[0]}
+
+
+def best_threshold(sizes, seq_times, par_times):
+    """(log score, T) of the sequential threshold T minimising the score when
+    blocks of size <= T run sequentially and larger ones in parallel (prefix
+    sums over blocks sorted by size: one bisection per trace and candidate)."""
+    tables = []
+    for tr in sizes:
+        if not sizes[tr]:
+            continue
+        rows = sorted(zip(sizes[tr], seq_times[tr], par_times[tr]))
+        ns = [n for n, _, _ in rows]
+        seq_prefix, par_suffix = [0.0], [0.0]
+        for _, s, _ in rows:
+            seq_prefix.append(seq_prefix[-1] + math.log(max(s, 1e-9)))
+        for _, _, p in reversed(rows):
+            par_suffix.append(par_suffix[-1] + math.log(max(p, 1e-9)))
+        tables.append((ns, seq_prefix, par_suffix[::-1]))
+    candidates = sorted({0, MAX_THRESHOLD} | {n for tr in sizes for n in sizes[tr]})
+    best = None
+    for threshold in candidates:
+        total = 0.0
+        for ns, seq_prefix, par_suffix in tables:
+            k = bisect.bisect_right(ns, threshold)  # blocks [0, k) run sequentially
+            total += (seq_prefix[k] + par_suffix[k]) / len(ns)
+        if best is None or total < best[0]:
+            best = (total, threshold)
+    return best
+
+
+def choose_stage1(results):
+    """Chunk, pairwise cut-off and sequential threshold per algorithm."""
+    p_runs = [r["name"] for r in stage1() if r["name"].startswith("P")]
+    s_runs = [r["name"] for r in stage1() if r["name"].startswith("S")]
+    sizes = results["sizes"]
+    cfg = {"ObjectHubThreshold": HUB_OFF}
+    why = {}
+    for alg, knobs in ALGS.items():
+        if alg in ISLAND_ALGS:
+            best_s = best_run(results, s_runs, alg)
+            cfg[knobs["pw"]] = results["runs"][best_s]["config"][knobs["pw"]]
+            seq_times = run_times(results, "S0-pw64", alg)  # same cut-off as the P runs
+        elif alg == "NaiveParallel":
+            seq_times = run_times(results, "S0-pw64", "NaiveSequential")
+        else:
+            seq_times = median_times(results, s_runs, alg)
+        # Chunk and threshold are chosen jointly: a large chunk alone would
+        # "win" on small blocks just by leaving a single worker.
+        _, threshold, best_p = min(best_threshold(sizes, seq_times, run_times(results, p, alg)) + (p,)
+                                   for p in p_runs)
+        cfg[knobs["chunk"]] = results["runs"][best_p]["config"][knobs["chunk"]]
+        # Sequential up to the largest measured block = never parallel here.
+        largest = max(n for tr in sizes for n in sizes[tr])
+        cfg[knobs["seq"]] = MAX_THRESHOLD if threshold >= largest else threshold
+        why[alg] = f"chunk from {best_p}" + (f", pw from {best_s}" if alg in ISLAND_ALGS else "")
+    return {"config": cfg, "why": why}
+
+
+def choose_stage2(results):
+    """Stage-1 choice plus the hub threshold of the island family."""
+    choice = choose_stage1(results)
+    s_best = {alg: best_run(results, [r["name"] for r in stage1() if r["name"].startswith("S")], alg)
+              for alg in ISLAND_ALGS}
+    # Hub off is represented by each algorithm's best sequential run; the shared
+    # hub knob is decided by Topology, the family's champion.
+    alg = "IslandTopologyShattered"
+    candidates = [(score(run_times(results, s_best[alg], alg)), HUB_OFF)]
+    for hub in HUBS:
+        t = run_times(results, f"H-hub{hub}", alg)
+        if t:
+            candidates.append((score(t), hub))
+    choice["config"]["ObjectHubThreshold"] = min(candidates)[1]
+    return choice
+
+
+def choose_final(results):
+    """Stage-2 choice, moved to a neighbour value only when the neighbour beats
+    it by more than NOISE_MARGIN in runs with the same load mix (a run's mix of
+    algorithms shifts every score in it, so only like runs are compared)."""
+    cfg = dict(choose_stage2(results)["config"])
+    centers = {"seq": "V-chosen", "pw": "V-pw-center"}
+    for alg, knobs in ALGS.items():
+        for kind, center in centers.items():
+            if kind not in knobs or not run_times(results, center, alg):
+                continue
+            best_score, best_value = score(run_times(results, center, alg)) / NOISE_MARGIN, cfg[knobs[kind]]
+            for name in (r["name"] for r in stage3(results) if r["name"].startswith(f"V-{kind}-")):
+                t = run_times(results, name, alg)
+                if t and name != center and score(t) < best_score:
+                    best_score, best_value = score(t), results["runs"][name]["config"][knobs[kind]]
+            cfg[knobs[kind]] = best_value
+    return cfg
+
+
+# --- sources --------------------------------------------------------------------
+
+def read_constants():
+    values = {}
+    for knob, (path, pattern) in KNOBS.items():
+        with open(path, "r", encoding="utf-8") as f:
+            m = pattern.search(f.read())
+        values[knob] = int(m.group(0)[len(m.group(1)):]) if m else None
+    return values
+
 
 def set_constants(cfg):
-    for param, value in cfg.items():
-        path, pattern = CONST_PATTERNS[param]
+    for knob, value in cfg.items():
+        path, pattern = KNOBS[knob]
         with open(path, "r", encoding="utf-8") as f:
             src = f.read()
         new_src, count = pattern.subn(lambda m: m.group(1) + str(value), src)
         if count != 1:
-            raise RuntimeError(
-                f"Expected exactly 1 match for {param} in {os.path.basename(path)}, found {count}. "
-                "The const declaration changed - update CONST_PATTERNS.")
+            raise RuntimeError(f"expected exactly 1 match for {knob} in {os.path.basename(path)}, found {count}")
         if new_src != src:
-            with open(path, "w", encoding="utf-8") as f:
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
                 f.write(new_src)
 
 
 def check_patterns():
-    for param, (path, pattern) in CONST_PATTERNS.items():
+    ok = True
+    for knob, (path, pattern) in KNOBS.items():
         with open(path, "r", encoding="utf-8") as f:
-            src = f.read()
-        matches = pattern.findall(src)
-        current = pattern.search(src)
-        print(f"  {param:<20} matches={len(matches)}  line: {current.group(0) if current else 'NOT FOUND'}")
-        if len(matches) != 1:
-            return False
-    return True
+            matches = pattern.findall(f.read())
+        print(f"  {knob:<28} {os.path.basename(path):<30} matches={len(matches)}")
+        ok &= len(matches) == 1
+    return ok
 
 
-# --- benchmark run + summary ------------------------------------------------
+# --- running --------------------------------------------------------------------
 
 def parse_ms(time_str):
     s = time_str.replace("Â", "").strip()
-    if "µs" in s or "us" in s:
-        return float(s.replace("µs", "").replace("us", "")) / 1000.0
-    if "ns" in s:
-        return float(s.replace("ns", "")) / 1e6
-    if "ms" in s:
-        return float(s.replace("ms", ""))
-    if "s" in s:
-        return float(s.replace("s", "")) * 1000.0
+    for unit, scale in (("µs", 1e-3), ("us", 1e-3), ("ns", 1e-6), ("ms", 1.0), ("s", 1e3)):
+        if s.endswith(unit):
+            return float(s[:-len(unit)]) * scale
     return 0.0
 
 
-def percentile(sorted_vals, p):
-    if not sorted_vals:
-        return 0.0
-    k = (len(sorted_vals) - 1) * p / 100.0
-    f = int(k)
-    c = min(f + 1, len(sorted_vals) - 1)
-    return sorted_vals[f] + (sorted_vals[c] - sorted_vals[f]) * (k - f)
-
-
-def ratio_stats(blocks, alg_num, alg_den):
-    """Per-block alg_num/alg_den time ratios: median + win rate of alg_den."""
-    ratios, wins = [], 0
-    for b in blocks:
-        num = parse_ms(b["times"][alg_num])
-        den = parse_ms(b["times"][alg_den])
-        if den > 0:
-            ratios.append(num / den)
-            if den < num:
-                wins += 1
-    if not ratios:
-        return None
-    return {
-        "median_ratio": round(statistics.median(ratios), 4),
-        "win_rate": round(wins / len(ratios), 4),
-    }
-
-
-def summarize_benchmark():
-    with open(BENCH_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    chains = {}
-    for chain in ("Ethereum", "Solana"):
-        blocks = [d for d in data if d["blockchain"] == chain]
-        if not blocks:
-            continue
-        algs = {}
-        for alg in ALGORITHMS:
-            vals = sorted(parse_ms(b["times"][alg]) for b in blocks if alg in b["times"])
-            if vals:
-                algs[alg] = {
-                    "median_ms": round(statistics.median(vals), 5),
-                    "mean_ms": round(statistics.fmean(vals), 5),
-                    "p95_ms": round(percentile(vals, 95), 5),
-                }
-        chains[chain] = {
-            "blocks": len(blocks),
-            "algs": algs,
-            "topo_vs_bitmap": ratio_stats(blocks, "Bitmap", "IslandTopologyShattered"),
-            "topo_vs_native": ratio_stats(blocks, "IslandNativeShattered", "IslandTopologyShattered"),
-            "native_vs_bitmap": ratio_stats(blocks, "Bitmap", "IslandNativeShattered"),
-        }
-
-    # Score: geometric mean across chains of Topology's median speedup vs
-    # same-run Bitmap (Bitmap has no hyperparameters, so it doubles as a
-    # per-run machine-noise normalizer). Higher is better.
-    speedups = [chains[c]["topo_vs_bitmap"]["median_ratio"]
-                for c in chains if chains[c].get("topo_vs_bitmap")]
-    score = round(math.prod(speedups) ** (1 / len(speedups)), 4) if speedups else 0.0
-    return chains, score
-
-
-def run_command(args, timeout=None):
-    print(f"    $ {' '.join(args)}", flush=True)
-    proc = subprocess.run(args, cwd=REPO_DIR, capture_output=True, text=True, timeout=timeout)
-    if proc.returncode != 0:
-        tail = "\n".join((proc.stdout + "\n" + proc.stderr).strip().splitlines()[-15:])
-        raise RuntimeError(f"{' '.join(args)} failed (exit {proc.returncode}):\n{tail}")
-
-
-def run_config(cfg, results):
-    key = config_key(cfg)
+def execute(run, results):
     started = time.time()
-    set_constants(cfg)
-    run_command(["go", "clean", "-cache"])
+    set_constants(run["config"])
     if os.path.exists(BENCH_FILE):
         os.remove(BENCH_FILE)
-    run_command(["go", "run", "."], timeout=GO_RUN_TIMEOUT_SEC)
-    chains, score = summarize_benchmark()
-    results["runs"][key] = {
-        "params": cfg,
-        "status": "ok",
-        "started": datetime.now().isoformat(timespec="seconds"),
-        "duration_sec": round(time.time() - started, 1),
-        "score": score,
-        "chains": chains,
+    args = ["go", "run", ".", "-algs=" + ",".join(run["algs"])]
+    print(f"    $ {' '.join(args)}", flush=True)
+    proc = subprocess.run(args, cwd=REPO_DIR, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=GO_RUN_TIMEOUT_SEC)
+    if proc.returncode != 0:
+        tail = "\n".join((proc.stdout + proc.stderr).strip().splitlines()[-15:])
+        raise RuntimeError(f"go run failed (exit {proc.returncode}):\n{tail}")
+    platform = next((l for l in proc.stdout.splitlines() if l.startswith("[Platform]")), "")
+
+    with open(BENCH_FILE, "r", encoding="utf-8") as f:
+        blocks = json.load(f)
+    sizes = {tr: [b["num_txns"] for b in blocks if b["blockchain"] == tr] for tr in TRACES}
+    if results.setdefault("sizes", sizes) != sizes:
+        raise RuntimeError("block list differs from earlier runs")
+    times = {alg: {tr: [parse_ms(b["times"][alg]) for b in blocks if b["blockchain"] == tr]
+                   for tr in TRACES} for alg in run["algs"]}
+    results["runs"][run["name"]] = {
+        **run, "platform": platform, "finished": datetime.now().isoformat(timespec="seconds"),
+        "duration_sec": round(time.time() - started, 1), "times": times,
     }
     save_results(results)
 
-
-# --- results persistence -----------------------------------------------------
 
 def load_results():
     if os.path.exists(RESULTS_FILE):
@@ -316,154 +381,85 @@ def load_results():
 
 def save_results(results):
     tmp = RESULTS_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=1)
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(results, f)
     os.replace(tmp, RESULTS_FILE)
 
 
-def get_result(results, cfg):
-    return results["runs"].get(config_key(cfg))
-
-
-def get_ok_result(results, cfg):
-    entry = results["runs"].get(config_key(cfg))
-    return entry if entry and entry.get("status") == "ok" else None
-
-
-# --- reporting ----------------------------------------------------------------
+# --- reporting ------------------------------------------------------------------
 
 def print_report(results):
-    entries = [e for e in results["runs"].values() if e.get("status") == "ok"]
-    if not entries:
-        print("No completed runs in tuning_results.json yet.")
+    runs = results["runs"]
+    if not runs:
+        print("No completed runs yet.")
         return
-    entries.sort(key=lambda e: e["score"], reverse=True)
+    print(f"\n=== {len(runs)} runs; score = geomean over traces of geomean per-block ms ===")
+    platforms = {r["platform"] for r in runs.values()}
+    for p in platforms:
+        print(f"  {p}")
+    algs = list(ALGS) + ["NaiveSequential"]
+    print(f"\n{'run':<22}{'min':>6}" + "".join(f"{a.replace('Island', '').replace('Shattered', ''):>14}" for a in algs))
+    for name, run in runs.items():
+        cells = "".join(f"{score(run['times'][a]):>14.5f}" if a in run["times"] else f"{'':>14}" for a in algs)
+        print(f"{name:<22}{run['duration_sec'] / 60:>6.1f}{cells}")
 
-    print(f"\n=== Leaderboard ({len(entries)} completed configs, score = geomean Topology speedup vs Bitmap) ===")
-    print(f"{'rank':<5}{'pw':>5}{'seq':>6}{'hub':>12}{'score':>8}   "
-          f"{'Eth t-vs-b':>11}{'Sol t-vs-b':>11}{'Eth t-vs-n':>11}{'Sol t-vs-n':>11}")
-    for rank, e in enumerate(entries[:15], 1):
-        p = e["params"]
-        cells = []
-        for chain in ("Ethereum", "Solana"):
-            for comp in ("topo_vs_bitmap", "topo_vs_native"):
-                stat = e["chains"].get(chain, {}).get(comp)
-                cells.append(f"x{stat['median_ratio']:.3f}" if stat else "-")
-        # reorder: Eth bitmap, Sol bitmap, Eth native, Sol native
-        eth_b, eth_n, sol_b, sol_n = cells
-        print(f"{rank:<5}{p['PairwiseIslandMax']:>5}{p['SequentialBlockMax']:>6}"
-              f"{p['ObjectHubThreshold']:>12}{e['score']:>8.4f}   "
-              f"{eth_b:>11}{sol_b:>11}{eth_n:>11}{sol_n:>11}")
+    # Run-to-run noise: the sequential runs repeat Bitmap and IDBucket unchanged.
+    s_runs = [n for n in runs if n.startswith("S")]
+    for alg in ROW_ALGS:
+        scores = [score(runs[n]["times"][alg]) for n in s_runs if alg in runs[n]["times"]]
+        if len(scores) > 1:
+            print(f"\n  noise, {alg} repeated {len(scores)}x: max/min score x{max(scores) / min(scores):.3f}")
 
-    print("\n=== Best config per algorithm (by median ms, per chain) ===")
-    for chain in ("Ethereum", "Solana"):
-        print(f"  {chain}:")
-        for alg in ALGORITHMS:
-            best = None
-            for e in entries:
-                stat = e["chains"].get(chain, {}).get("algs", {}).get(alg)
-                if stat and (best is None or stat["median_ms"] < best[0]):
-                    best = (stat["median_ms"], e["params"])
-            if best:
-                ms, p = best
-                print(f"    {alg:<26} {ms:>9.4f}ms  @ pw={p['PairwiseIslandMax']} "
-                      f"seq={p['SequentialBlockMax']} hub={p['ObjectHubThreshold']}")
-
-    best = entries[0]
-    p = best["params"]
-    print(f"\n>>> BEST OVERALL: pw={p['PairwiseIslandMax']} seq={p['SequentialBlockMax']} "
-          f"hub={p['ObjectHubThreshold']}  (score x{best['score']:.4f})")
-    failed = [k for k, e in results["runs"].items() if e.get("status") != "ok"]
-    if failed:
-        print(f"\n[!] {len(failed)} failed configs (delete their entries from "
-              f"tuning_results.json to retry): {', '.join(failed)}")
+    if all(r["name"] in runs for r in stage1()):
+        print("\nStage-1 choice:", choose_stage1(results)["config"])
+    if all(r["name"] in runs for r in stage1() + stage2(results)):
+        print("Stage-2 choice:", choose_stage2(results)["config"])
+    plan = build_plan(results)
+    if all(r["name"] in runs for r in plan) and any(r["stage"] == 3 for r in plan):
+        print("Final choice:  ", choose_final(results))
 
 
-# --- main ----------------------------------------------------------------------
+# --- main -----------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--plan", action="store_true", help="list pending configs and exit")
-    parser.add_argument("--report", action="store_true", help="print leaderboard and exit")
-    parser.add_argument("--check", action="store_true", help="verify const regexes and exit")
+    parser.add_argument("--plan", action="store_true", help="list pending runs and exit")
+    parser.add_argument("--report", action="store_true", help="print the results and exit")
+    parser.add_argument("--check", action="store_true", help="verify the knob regexes and exit")
+    parser.add_argument("--no-apply", action="store_true", help="do not write the winners into the sources")
     args = parser.parse_args()
 
     if args.check:
-        ok = check_patterns()
-        sys.exit(0 if ok else 1)
-
+        sys.exit(0 if check_patterns() else 1)
     results = load_results()
-
     if args.report:
         print_report(results)
         return
-
-    phases = build_phases(results)
-    pending = [(idx, cfg) for idx, phase in enumerate(phases)
-               for cfg in phase if not get_result(results, cfg)]
-    total = sum(len(phase) for phase in phases)
-    done = total - len(pending)
-
-    print(f"Phases generated: {len(phases)} | configs: {total} total, {done} done, {len(pending)} pending")
     if args.plan:
-        for idx, cfg in pending:
-            print(f"  phase {idx}: {config_key(cfg)}")
-        if len(phases) <= REFINE_ROUNDS:
-            print("  (+ finer refinement phase(s) will be generated once the current phase completes)")
+        for r in build_plan(results):
+            state = "done" if r["name"] in results["runs"] else "pending"
+            print(f"  stage {r['stage']} {r['name']:<22} {state:<8} algs={','.join(r['algs'])}")
         return
-
     if not check_patterns():
-        sys.exit("Const patterns did not match - aborting before touching anything.")
+        sys.exit("knob patterns did not match - aborting before touching anything")
 
-    durations = []
+    original = read_constants()
+    final = None
     try:
         while True:
+            pending = [r for r in build_plan(results) if r["name"] not in results["runs"]]
             if not pending:
-                # A completed phase may unlock the next refinement round.
-                phases = build_phases(results)
-                pending = [(idx, cfg) for idx, phase in enumerate(phases)
-                           for cfg in phase if not get_result(results, cfg)]
-                if not pending:
-                    break
-
-            idx, cfg = pending.pop(0)
-            key = config_key(cfg)
-            n_left = len(pending) + 1
-            eta = ""
-            if durations:
-                avg = statistics.fmean(durations) + COOLDOWN_SEC
-                eta = f" | ~{n_left * avg / 3600:.1f}h remaining"
-            print(f"\n[phase {idx}] {key}  ({n_left} to go{eta})", flush=True)
-
-            t0 = time.time()
-            try:
-                run_config(cfg, results)
-                entry = results["runs"][key]
-                durations.append(entry["duration_sec"])
-                best = max((e for e in results["runs"].values() if e.get("status") == "ok"),
-                           key=lambda e: e["score"])
-                print(f"    -> score x{entry['score']:.4f} in {entry['duration_sec']:.0f}s "
-                      f"| best so far x{best['score']:.4f} ({config_key(best['params'])})")
-            except (RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError) as err:
-                print(f"    -> FAILED: {err}")
-                results["runs"][key] = {
-                    "params": cfg,
-                    "status": "failed",
-                    "started": datetime.now().isoformat(timespec="seconds"),
-                    "duration_sec": round(time.time() - t0, 1),
-                    "error": str(err)[:500],
-                }
-                save_results(results)
-
-            if pending or len(phases) <= REFINE_ROUNDS:
-                print(f"    cooling down {COOLDOWN_SEC}s...", flush=True)
-                time.sleep(COOLDOWN_SEC)
+                break
+            run = pending[0]
+            print(f"\n[stage {run['stage']}] {run['name']} ({len(pending)} pending in this stage)", flush=True)
+            execute(run, results)
+            print(f"    -> {results['runs'][run['name']]['duration_sec'] / 60:.1f} min", flush=True)
+        final = choose_final(results)
     except KeyboardInterrupt:
         print("\nInterrupted - progress is saved; rerun to resume.")
     finally:
-        set_constants(BASELINE)
-        print("Restored tuned constants (pw=64, seq=3000, hub=10**9).")
-
+        set_constants(final if final and not args.no_apply else original)
+        print("Sources set to the " + ("tuned" if final and not args.no_apply else "original") + " knob values.")
     print_report(results)
 
 

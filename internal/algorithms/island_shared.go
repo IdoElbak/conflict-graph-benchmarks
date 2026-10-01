@@ -1,27 +1,20 @@
 package algorithms
 
-import (
-	"conflict-graph-benchmarks/internal/model"
-	"math/bits"
-)
+import "conflict-graph-benchmarks/internal/model"
 
 // ---------------------------------------------------------------------------
-// Hyper-parameters of the island family. Every tunable knob lives here; the
-// in-code values are the tuned best config from the 2026-07-11 grid search
-// (tune_hyperparams.py rewrites these literals when re-tuning).
+// Hyper-parameters shared by the island family. Each algorithm's own knobs
+// (pairwise cut-off, sequential threshold) live in its own file;
+// tune_hyperparams.py rewrites these literals when re-tuning.
 // ---------------------------------------------------------------------------
-
-// PairwiseIslandMax is the island size at or below which direct pairwise set
-// scans beat bitwise row sweeps, letting tiny islands dodge the index entirely.
-const PairwiseIslandMax = 64 //default: 6
-
-// SequentialBlockMax is the block size at or below which goroutine spawn
-// overhead exceeds the parallel gain, so both phases run inline.
-const SequentialBlockMax uint32 = 3000 //default: 384
 
 // ObjectHubThreshold is the per-object access count above which an object is
 // treated as a hub and bypassed by the Union-Find partition.
 const ObjectHubThreshold uint32 = 1000000000 //default: 50
+
+// HubToucherChunk is the number of hub touchers a worker claims at once in the
+// parallel hub phase.
+const HubToucherChunk = 64
 
 // ---------------------------------------------------------------------------
 // Shared front-half of the Native/Topology pipelines (BlockTopology-based).
@@ -105,121 +98,29 @@ func partitionViaAnchors(block *model.Block, topo *model.BlockTopology) {
 	}
 }
 
+// planIslandWork lists the work units of the parallel per-island phase: every
+// island whole, except sweep islands (larger than pairwiseMax) with more than
+// splitRows rows, which are cut into row ranges of splitRows. Once the index
+// is built their rows are independent, so one giant island no longer bounds
+// the phase. Pairwise islands stay whole: they write both rows of each pair.
+func planIslandWork(topo *model.BlockTopology, pairwiseMax int, splitRows uint32) {
+	units := topo.WorkUnits[:0]
+	for islandIdx, island := range topo.Islands {
+		k := uint32(len(island))
+		step := k
+		if len(island) > pairwiseMax && k > splitRows {
+			step = splitRows
+		}
+		for lo := uint32(0); lo < k; lo += step {
+			units = append(units, model.IslandSpan{Island: uint32(islandIdx), Lo: lo, Hi: min(lo+step, k)})
+		}
+	}
+	topo.WorkUnits = units
+}
+
 // ---------------------------------------------------------------------------
-// Bucket/inverted-index era helpers. buildMasterIndex, partitionViaStarTopology
-// and partitionViaInvertedIndex are only referenced by the archived variants in
-// archive/ (kept live so revival is a plain file move).
+// Pairwise island helpers and statistics.
 // ---------------------------------------------------------------------------
-
-// buildMasterIndex fuses access counting and bitmap construction into one pass
-func buildMasterIndex(block *model.Block) (*model.ObjectInvertedIndex, []struct{ reads, writes uint32 }) {
-	invIndex := model.NewInvertedIndex(block)
-	counts := make([]struct{ reads, writes uint32 }, block.NumUniqueObjects)
-
-	for txnIdx := range block.Transactions {
-		tIdx := uint32(txnIdx)
-		for _, objID := range block.Transactions[txnIdx].ReadSet {
-			invIndex.Insert(tIdx, objID, false)
-			counts[objID].reads++
-		}
-		for _, objID := range block.Transactions[txnIdx].WriteSet {
-			invIndex.Insert(tIdx, objID, true)
-			counts[objID].writes++
-		}
-	}
-	return invIndex, counts
-}
-
-// partitionViaStarTopology links readers and writers
-func partitionViaStarTopology(numObjects uint32, bucket *model.ObjectIdBucket, uf *model.UnionFind, isHubObject []bool) {
-	for objID := uint32(0); objID < numObjects; objID++ {
-
-		if isHubObject != nil && isHubObject[objID] {
-			continue
-		}
-
-		writers := bucket.GetWriteSets(objID)
-		if len(writers) == 0 {
-			continue
-		}
-
-		anchor := writers[0]
-		for i := 1; i < len(writers); i++ {
-			uf.Union(anchor, writers[i])
-		}
-
-		readers := bucket.GetReaders(objID)
-		for _, reader := range readers {
-			uf.Union(anchor, reader)
-		}
-	}
-}
-
-// partitionViaInvertedIndex partitions islands directly from bitsets, bypassing sparse bucket allocation
-func partitionViaInvertedIndex(numObjects uint32, invIndex *model.ObjectInvertedIndex, uf *model.UnionFind, isHubObject []bool) {
-	for objID := uint32(0); objID < numObjects; objID++ {
-		if isHubObject != nil && isHubObject[objID] {
-			continue
-		}
-
-		writers := invIndex.GetObjectWriteSetBucket(objID)
-		var anchor uint32 = model.MaximumGraphSize + 1
-
-		// Find the first writer and union all writers to it
-		for wordIdx := uint32(0); wordIdx < model.BucketSize; wordIdx++ {
-			activeBits := writers[wordIdx]
-			if activeBits == 0 {
-				continue
-			}
-			baseTxnIdx := wordIdx * model.SizeOfUint64
-			for activeBits != 0 {
-				tIdx := baseTxnIdx + uint32(bits.TrailingZeros64(activeBits))
-				if anchor > model.MaximumGraphSize {
-					anchor = tIdx
-				} else {
-					uf.Union(anchor, tIdx)
-				}
-				activeBits &= activeBits - 1
-			}
-		}
-
-		// Only pass this statement if there were no writers. Meaning no union operations to be called
-		if anchor > model.MaximumGraphSize {
-			continue
-		}
-
-		// Union all readers of this object to the Anchor writer
-		readers := invIndex.GetObjectReadSetBucket(objID)
-		for wordIdx := uint32(0); wordIdx < model.BucketSize; wordIdx++ {
-			activeBits := readers[wordIdx]
-			if activeBits == 0 {
-				continue
-			}
-			baseTxnIdx := wordIdx * model.SizeOfUint64
-			for activeBits != 0 {
-				uf.Union(anchor, baseTxnIdx+uint32(bits.TrailingZeros64(activeBits)))
-				activeBits &= activeBits - 1
-			}
-		}
-	}
-}
-
-// groupValidIslands aggregates the Union-Find trees and filters out singletons
-func groupValidIslands(n uint32, uf *model.UnionFind) [][]uint32 {
-	rawIslands := make([][]uint32, n)
-	for txnIdx := uint32(0); txnIdx < n; txnIdx++ {
-		root := uf.Find(txnIdx)
-		rawIslands[root] = append(rawIslands[root], txnIdx)
-	}
-
-	var validIslands [][]uint32
-	for _, island := range rawIslands {
-		if len(island) > 1 {
-			validIslands = append(validIslands, island)
-		}
-	}
-	return validIslands
-}
 
 // processSingleIsland executes a sequential, pairwise conflict check within an isolated transaction island
 func processSingleIsland(island []uint32, block *model.Block, graph *model.ConflictGraph) {

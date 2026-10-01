@@ -5,74 +5,57 @@ import (
 	"conflict-graph-benchmarks/internal/model"
 )
 
-// BitmapConstruction builds the conflict graph using an inverted index to perform bulk bitwise conflict detection
-func BitmapConstruction(block *model.Block, graph *model.ConflictGraph) (int, int, float64) {
-	invertedIndex := populateInvertedIndex(block)
-	n := len(block.Transactions)
+// BitmapSequentialMax is the block size at or below which Bitmap sweeps its
+// rows inline, because starting workers costs more than it saves.
+const BitmapSequentialMax uint32 = 518
 
-	actualBucketSize := (uint32(n) + model.SizeOfUint64 - 1) / model.SizeOfUint64
+// BitmapChunkRows is the number of rows a worker claims at once.
+const BitmapChunkRows = 16
 
-	concurrency.ParallelRun(n, func(jobQueue <-chan int) {
-		updateConflictsWorker(invertedIndex, block, graph, jobQueue, actualBucketSize)
-	})
+// BitmapConstruction builds the full symmetric conflict matrix: each
+// transaction's row is the word-wide OR of the index rows it can conflict
+// through. index is reusable scratch, all-zero between calls. Every row of
+// graph is overwritten, so graph needs no clearing beforehand.
+func BitmapConstruction(block *model.Block, graph *model.ConflictGraph, index *model.ObjectInvertedIndex) {
+	n := uint32(len(block.Transactions))
+	index.Prepare(block.NumUniqueObjects, n)
+	index.Build(block)
+	graph.SetSize(n)
 
-	return 0, 0, 0
-}
-
-// populateInvertedIndex constructs the mapping from objects to their respective transaction access bitsets
-func populateInvertedIndex(block *model.Block) *model.ObjectInvertedIndex {
-	invertedIndex := model.NewInvertedIndex(block)
-
-	for txnIdx := range block.Transactions {
-		for _, objectID := range block.Transactions[txnIdx].ReadSet {
-			invertedIndex.Insert(uint32(txnIdx), objectID, false)
-		}
-
-		for _, objectID := range block.Transactions[txnIdx].WriteSet {
-			invertedIndex.Insert(uint32(txnIdx), objectID, true)
-		}
+	if n <= BitmapSequentialMax {
+		sweepBitmapRows(block, graph, index, 0, n)
+	} else {
+		concurrency.ParallelFor(int(n), BitmapChunkRows, func(_, lo, hi int) {
+			sweepBitmapRows(block, graph, index, uint32(lo), uint32(hi))
+		})
 	}
 
-	return invertedIndex
+	index.Wipe(block)
 }
 
-// updateConflictsWorker aggregates object-level bitsets into a full transaction conflict vector
-func updateConflictsWorker(invertedIndex *model.ObjectInvertedIndex, block *model.Block, graph *model.ConflictGraph, jobQueue <-chan int, actualBucketSize uint32) {
-	conflictVector := make([]uint64, model.BucketSize)
+// sweepBitmapRows writes rows [lo, hi) of graph straight into the output: a
+// written object contributes its writers and readers (W-W, W-R), a read object
+// its writers (R-W); the self bit is cleared last.
+func sweepBitmapRows(block *model.Block, graph *model.ConflictGraph, index *model.ObjectInvertedIndex, lo, hi uint32) {
+	for txnIdx := lo; txnIdx < hi; txnIdx++ {
+		row := graph.Row(txnIdx)
+		clear(row)
+		txn := &block.Transactions[txnIdx]
 
-	for txnIdx := range jobQueue {
-		// Add W-R and W-W conflicts to the transaction's conflict-vector
-		for _, objID := range block.Transactions[txnIdx].WriteSet {
-			objectWriters := invertedIndex.GetObjectWriteSetBucket(objID)
-			objectReaders := invertedIndex.GetObjectReadSetBucket(objID)
-
-			for bIdx := uint32(0); bIdx < actualBucketSize; bIdx++ {
-				conflictVector[bIdx] |= objectWriters[bIdx] | objectReaders[bIdx]
+		for _, objID := range txn.WriteSet {
+			writers := index.GetObjectWriteSetBucket(objID)[:len(row)]
+			readers := index.GetObjectReadSetBucket(objID)[:len(row)]
+			for bIdx := range row {
+				row[bIdx] |= writers[bIdx] | readers[bIdx]
+			}
+		}
+		for _, objID := range txn.ReadSet {
+			writers := index.GetObjectWriteSetBucket(objID)[:len(row)]
+			for bIdx := range row {
+				row[bIdx] |= writers[bIdx]
 			}
 		}
 
-		// Add R-W conflicts to the transaction's conflict-vector
-		for _, objID := range block.Transactions[txnIdx].ReadSet {
-			objectWriters := invertedIndex.GetObjectWriteSetBucket(objID)
-
-			for bIdx := uint32(0); bIdx < actualBucketSize; bIdx++ {
-				conflictVector[bIdx] |= objectWriters[bIdx]
-			}
-		}
-
-		// Calculate the location of the transaction itself in its conflictVector
-		wordIdx := uint32(txnIdx) / model.SizeOfUint64
-		bitIdx := uint32(txnIdx) % model.SizeOfUint64
-
-		// Clear the self-conflict bit
-		conflictVector[wordIdx] &= ^(model.MaskActiveBit << bitIdx)
-
-		// Update the graph
-		graph.AddRow(uint32(txnIdx), conflictVector)
-
-		// Fast clear
-		for bIdx := uint32(0); bIdx < actualBucketSize; bIdx++ {
-			conflictVector[bIdx] = 0
-		}
+		row[txnIdx/model.SizeOfUint64] &^= model.MaskActiveBit << (txnIdx % model.SizeOfUint64)
 	}
 }

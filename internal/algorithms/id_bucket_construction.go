@@ -5,83 +5,55 @@ import (
 	"conflict-graph-benchmarks/internal/model"
 )
 
-// IDBucketConstruction builds the conflict graph using sparse memory buckets
-func IDBucketConstruction(block *model.Block, graph *model.ConflictGraph) {
-	n := len(block.Transactions)
-	bucket := populateIDBucket(block)
+// IDBucketSequentialMax is the block size at or below which IDBucket emits its
+// rows inline, because starting workers costs more than it saves.
+const IDBucketSequentialMax uint32 = 217
 
-	concurrency.ParallelRun(n, func(jobQueue <-chan int) {
-		bucketWorker(bucket, block, graph, jobQueue)
+// IDBucketChunkRows is the number of rows a worker claims at once.
+const IDBucketChunkRows = 64
+
+// IDBucketConstruction builds the conflict graph from per-object reader and
+// writer lists (the "optimized hash-map": object IDs are dense, so the map is
+// a CSR array). Each worker owns whole rows and sets one bit per conflicting
+// peer, so both triangles are written directly and no symmetry pass is needed.
+// bucket is reusable scratch; every row of graph is overwritten.
+func IDBucketConstruction(block *model.Block, graph *model.ConflictGraph, bucket *model.ObjectIdBucket) {
+	n := uint32(len(block.Transactions))
+	bucket.Build(block)
+	graph.SetSize(n)
+
+	if n <= IDBucketSequentialMax {
+		emitBucketRows(block, graph, bucket, 0, n)
+		return
+	}
+	concurrency.ParallelFor(int(n), IDBucketChunkRows, func(_, lo, hi int) {
+		emitBucketRows(block, graph, bucket, uint32(lo), uint32(hi))
 	})
-
-	// Execute symmetry pass to mirror the upper-triangular part of the graph to the lower
-	graph.SyncSymmetry(uint32(n))
 }
 
-// populateIDBucket pre-allocates slices for ObjectIdBucket and fills them with the transaction IDs
-func populateIDBucket(block *model.Block) *model.ObjectIdBucket {
-	bucket := model.NewIdBucket(block.NumUniqueObjects)
-	n := len(block.Transactions)
+// emitBucketRows writes rows [lo, hi): a written object contributes its
+// writers and readers, a read object its writers; the self bit is cleared last.
+func emitBucketRows(block *model.Block, graph *model.ConflictGraph, bucket *model.ObjectIdBucket, lo, hi uint32) {
+	for txnIdx := lo; txnIdx < hi; txnIdx++ {
+		row := graph.Row(txnIdx)
+		clear(row)
+		txn := &block.Transactions[txnIdx]
 
-	counts := countObjectAccesses(block)
-	for objID := uint32(0); objID < block.NumUniqueObjects; objID++ {
-		bucket.Preallocate(objID, counts[objID].reads, counts[objID].writes)
-	}
-
-	for txnIdx := 0; txnIdx < n; txnIdx++ {
-		for _, objID := range block.Transactions[txnIdx].WriteSet {
-			bucket.Insert(uint32(txnIdx), objID, true)
+		for _, objID := range txn.WriteSet {
+			setPeerBits(row, bucket.GetWriteSets(objID))
+			setPeerBits(row, bucket.GetReaders(objID))
 		}
-		for _, objID := range block.Transactions[txnIdx].ReadSet {
-			bucket.Insert(uint32(txnIdx), objID, false)
-		}
-	}
-
-	return bucket
-}
-
-// countObjectAccesses performs a single pass over all transactions to tally the exact number of readers and writers per object
-func countObjectAccesses(block *model.Block) []struct{ reads, writes uint32 } {
-	counts := make([]struct{ reads, writes uint32 }, block.NumUniqueObjects)
-	n := len(block.Transactions)
-
-	for txnIdx := 0; txnIdx < n; txnIdx++ {
-		for _, objID := range block.Transactions[txnIdx].WriteSet {
-			counts[objID].writes++
+		for _, objID := range txn.ReadSet {
+			setPeerBits(row, bucket.GetWriteSets(objID))
 		}
 
-		for _, objID := range block.Transactions[txnIdx].ReadSet {
-			counts[objID].reads++
-		}
-	}
-
-	return counts
-}
-
-// bucketWorker lock-free parallel graph construction using row ownerships
-func bucketWorker(bucket *model.ObjectIdBucket, block *model.Block, graph *model.ConflictGraph, jobQueue <-chan int) {
-
-	for txnIdx := range jobQueue {
-		for _, objID := range block.Transactions[txnIdx].WriteSet {
-			objectWriters := bucket.GetWriteSets(objID)
-			addEdges(graph, uint32(txnIdx), objectWriters)
-
-			objectReaders := bucket.GetReaders(objID)
-			addEdges(graph, uint32(txnIdx), objectReaders)
-		}
-
-		for _, objID := range block.Transactions[txnIdx].ReadSet {
-			objectWriters := bucket.GetWriteSets(objID)
-			addEdges(graph, uint32(txnIdx), objectWriters)
-		}
+		row[txnIdx/model.SizeOfUint64] &^= model.MaskActiveBit << (txnIdx % model.SizeOfUint64)
 	}
 }
 
-// addEdges strictly records conflicts in the upper triangular matrix to enforce co-execution safety
-func addEdges(graph *model.ConflictGraph, txnIdx uint32, peerIDs []uint32) {
-	for _, peerIdx := range peerIDs {
-		if txnIdx < peerIdx {
-			graph.AddEdge(txnIdx, peerIdx)
-		}
+// setPeerBits sets the bit of every peer in row.
+func setPeerBits(row []uint64, peers []uint32) {
+	for _, peerIdx := range peers {
+		row[peerIdx/model.SizeOfUint64] |= model.MaskActiveBit << (peerIdx % model.SizeOfUint64)
 	}
 }
