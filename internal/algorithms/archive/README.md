@@ -10,7 +10,7 @@ Every file carries a `//go:build ignore` header, so nothing here is ever compile
 | `island_object_shattered.go` | `IslandConstructionObjectShattered` | First object-hub variant; fixed-width sweeps, reintegrates against all n txns. Superseded by Native. |
 | `island_dynamic_object_shattered.go` | `IslandConstructionDynamicShattered` | ObjectShattered + dynamic sweep width + toucher-only reintegration, but allocates per call. Superseded by Native. |
 
-Live variants remain in `internal/algorithms/`: `IslandConstructionNativeShattered` and `IslandConstructionTopologyShattered`, plus the Bitmap/IDBucket/naive baselines.
+Live algorithms (2026-10-02): `IslandLean` and `IslandLeanHub`, Bitmap and IDBucket, and `NaiveSequential` as the untimed parity reference.
 
 ## Phase 2 review (2026-09-28): none revived
 
@@ -39,3 +39,18 @@ allocation per call, live-sized rows, `ParallelFor` with a sequential threshold.
    the `//go:build ignore` line.
 2. Port it as above.
 3. Register it in `newAlgorithms` in `main.go`.
+
+## Retired 2026-10-02 (after Phase 4)
+
+| File | Algorithm | Why archived |
+|---|---|---|
+| `island_native_shattered.go` | `IslandConstructionNativeShattered` | Superseded by `IslandLean` (Phase 4): same idea, global-matrix output, ×0.3–0.7 of IslandLean's speed on every trace. |
+| `island_topology_shattered.go` | `IslandConstructionTopologyShattered` | Superseded by `IslandLean` / `IslandLeanHub` (Phase 4), which keep its output contract (now `model.IslandTopology`) and are ×1.4–2.6 faster. |
+| `island_shared.go` | the two files' shared helpers and hub knobs | Only those two used them; the live `island_shared.go` is the Phase 4 rewrite. |
+| `naive_parallel.go` | `NaiveParallel` | Removed from the timed suite (O(n²), 10–100× slower than the rest). `NaiveSequential` stays, untimed, as the parity reference. |
+
+They need `model.BlockTopology` and `model.UnionFind`, archived with them in
+`internal/model/archive/`. Reviving one means moving those back as well
+(`BlockTopology` also needs `growU32`/`growU64`, now the generic `model.Resize`),
+deleting the `//go:build ignore` lines and registering it in `newAlgorithms`.
+Phase 4's numbers for Native and Topology are in `PHASE4_RESULTS.md`.

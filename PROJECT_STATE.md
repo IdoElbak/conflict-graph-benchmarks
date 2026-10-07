@@ -1,6 +1,24 @@
 # Project State — Conflict Graph Construction Benchmarks
 
-*Snapshot: 2026-09-28 (end of Phase 2; §0 has the changelog). Companion files: `ALGORITHMS.md` (pseudo-code, knobs), `ANOMALIES.md` (measurement investigation), `PHASE4_DIRECTIONS.md` (next steps).*
+*Snapshot: 2026-10-02 (end of Phase 4 plus its cleanup; §0 has the changelog). Companion files: `ALGORITHMS.md` (pseudo-code, knobs), `ANOMALIES.md` (measurement investigation), `PHASE4_DIRECTIONS.md` (Phase 4 plan), `PHASE4_RESULTS.md` (Phase 4 results).*
+
+## 0. Changelog 2026-10-02 (cleanup after Phase 4)
+
+- **The access filters are folded into Bitmap and IDBucket** (`bitmap.go`, `id_bucket_construction.go`; the state lives in `model.ObjectInvertedIndex` / `model.ObjectIdBucket`). `bitmap_live.go` and `id_bucket_live.go` are deleted. The merged Bitmap is faster than BitmapLive was (Ethereum 2.48 vs 2.93 µs): same filter, without a per-access call. Compacting Bitmap's rows branch-free was measured and loses (×0.85).
+- **The island algorithms moved out of the lab:** `island_lean.go`, `island_lean_hub.go`, and a new `island_shared.go` (knobs `IslandConfig`, partition, kernels, parallel path). The data structures moved to `model/island_topology.go` (`IslandTopology`, `IslandForest`, `IslandIndex`, `LiveAccesses`, generic `Resize`). The options Phase 4 settled are no longer options (private-object skipping and compaction always on). Hub detection is a `HubRule` interface; the default `PrefixHubs` is called directly, since the dynamic call cost ~2%.
+- **Archived:** IslandNativeShattered, IslandTopologyShattered and their `island_shared.go`, plus NaiveParallel, to `internal/algorithms/archive/`; `model/island_graph.go` (BlockTopology) and `model/union_find.go` to `internal/model/archive/`. All are build-ignored, with READMEs.
+- **Timed suite:** Bitmap, IDBucket, IslandLean, IslandLeanHub. NaiveSequential stays as the untimed parity reference.
+- **Proving ground:** `ufarena.go` now sweeps IslandLean's knobs and IslandLeanHub's hub rules. `uflab` holds only the counting-based rules (`hub_rules.go`).
+- **Tests and tooling:** `internal/algorithms/parity_test.go` (seeded random blocks, all algorithms and rules vs NaiveSequential). `tune_hyperparams.py` now tunes Bitmap and IDBucket only (the island knobs are tuned in the proving ground). `plot_metrics.py` gives every panel its own time axis, in µs. Stale result files were removed.
+- **Definitive numbers** (§4): IslandLeanHub vs Bitmap ×1.30 geo. Same-run A/B against the lab code: the refactor costs nothing (×1.01).
+
+## 0. Changelog 2026-10-01 (Phase 4: the Union-Find proving ground, done before Phase 3)
+
+- **Proving ground**: `go run . -suite=uf` times only island variants against each other (Native and Topology as references, lab variants from the new package `internal/algorithms/uflab/`, registry `ufarena.go`), with `-traces`, `-blocks`, `-out`; `show_results.py --baseline X --league` prints one row per configuration with island statistics. The final registry re-runs the whole Phase 4 sweep (ablation + 7 hub heuristics with mini sweeps) in one command.
+- **Two new island algorithms in the main suite** (Native and Topology untouched): **IslandLean** (Topology contract; two-pass anchor partition with per-transaction root tracking; islands read off circular member lists; dead reads and private objects never indexed; branchless compaction of each island's live accesses; one-word rows for islands ≤ 64; single-pass parallel path with cost-based dispatch) and **IslandLeanHub** (IslandLean + hub layer: hub objects out of the partition, their conflicts as a bit-matrix over hub touchers; hubs = objects written by ≥ 4 of the first 64 transactions).
+- **Fairness counterparts**: **BitmapLive** and **IDBucketLive** get the access filters (Bitmap ×1.18 geo from them; IDBucket ×1.04). BitmapLive is the fair baseline from now on.
+- **Result** (§4): IslandLeanHub vs BitmapLive ×1.37 geo; ahead on Solana (×1.82), both Ethereum traces (×1.12 / ×1.22) and YCSB/TPC up to ~10% density (×1.3–2.8); behind on Sui (×0.75–0.90, ~10-txn blocks, ±20% noise at 0.3 µs) and zipfian YCSB above 10% density (×0.72). Superseded by the 2026-10-02 run in §4: the merged Bitmap is faster than BitmapLive was, so the Ethereum leads shrank to ×0.97 / ×1.05.
+- Harness: island statistics read off lab outputs untimed (`IslandStat` gained `in_islands`, `hub_touched`, size histogram); `plot_metrics.py` bins per trace (no raw dots) and takes `--algs`.
 
 ## 0. Changelog 2026-09-28 (Phase 2: every algorithm equalized)
 
@@ -37,11 +55,24 @@ Build undirected prestate conflict graphs (edge ⟺ W-W or R-W overlap; never R-
 
 ## 3. Harness & guarantees
 
-`main.go` registers the algorithms (`newAlgorithms`, each with its own reusable scratch; `-algs` selects a subset) and `pipeline_utils.go` streams six traces (Ethereum, Ethereum without the fee hub, Solana, Sui, YCSB, TPC-C style). Per block and algorithm it records the **median of 5 rounds × 100 calls** (after one warm-up call and a GC; calls slower than 2 ms get fewer iterations per round) into `benchmark_results.json`. On Windows the harness times with QueryPerformanceCounter, opts out of power throttling and pins to the performance cores (`bench_platform_*.go`; see `ANOMALIES.md`). Blocks larger than `MaximumGraphSize` are skipped. Every algorithm's output is compared bit-for-bit with **NaiveSequential**, run untimed on every block (mismatch = fatal); Topology's output is reconstructed into a matrix untimed for this check.
-Tooling: `show_results.py` (text tables), `plot_metrics.py` (graphs, per-panel x axes), `trace_statistics.py`, `tune_hyperparams.py` (short tuning pass, one command, resumable).
+`main.go` registers the timed algorithms (`newAlgorithms`: Bitmap, IDBucket, IslandLean, IslandLeanHub, each with its own reusable scratch; `-algs` selects a subset; `-suite=uf` switches to the proving ground of `ufarena.go`) and `pipeline_utils.go` streams six traces (Ethereum, Ethereum without the fee hub, Solana, Sui, YCSB, TPC-C style). Per block and algorithm it records the **median of 5 rounds × 100 calls** (after one warm-up call and a GC; calls slower than 2 ms get fewer iterations per round) into `benchmark_results.json`. On Windows the harness times with QueryPerformanceCounter, opts out of power throttling and pins to the performance cores (`bench_platform_*.go`; see `ANOMALIES.md`). Blocks larger than `MaximumGraphSize` are skipped. Every algorithm's output is compared bit-for-bit with **NaiveSequential**, run untimed on every block (mismatch = fatal); the island algorithms' topologies are reconstructed into a matrix untimed for this check. `go test ./...` runs the same check on seeded random blocks in under a second.
+Tooling: `show_results.py` (text tables; `--league --baseline X` for the proving ground), `plot_metrics.py` (graphs, per-panel axes), `trace_statistics.py`, `tune_hyperparams.py` (Bitmap and IDBucket knobs, one command, resumable).
 Measurement caveat (2026-09-28): whole-run scores of unchanged code drift up to ×1.11 between runs on the laptop (more for parallel code), so compare algorithms within one run, and compare parallel against sequential paired within one process.
 
-## 4. Current results (Phase 2, 2026-09-28; before = commit c9fdd2b code, after = Phase 2 code, run back to back on AC)
+## 4. Current results (2026-10-02, after the Phase 4 cleanup; full traces, one run, on AC)
+
+Median per-block speed-up vs **Bitmap** (which includes the Phase 4 access filters), win rate in
+parentheses; synthetic traces split by realized density; geo = geometric mean over the 10 columns:
+
+| vs Bitmap | Ethereum | no fee hub | Solana | Sui | YCSB <1% / 1–10% / ≥10% | TPC <1% / 1–10% / ≥10% | geo |
+|---|---|---|---|---|---|---|---|
+| IslandLeanHub | ×0.97 (43%) | ×1.05 (69%) | ×1.93 (98%) | ×0.75 | ×2.55 / 1.21 / 0.74 | ×2.52 / 1.51 / 1.10 | ×1.30 |
+| IslandLean | ×0.59 | ×0.93 | ×1.98 | ×0.75 | ×2.85 / 1.24 / 0.68 | ×2.91 / 1.56 / 1.03 | ×1.25 |
+| IDBucket | ×0.08 | ×0.38 | ×1.07 | ×0.39 | ×0.57 / 0.69 / 0.31 | ×0.72 / 0.79 / 0.42 | ×0.46 |
+
+Medians (µs) Bitmap / IslandLeanHub: Ethereum 2.48 / 2.62, no fee hub 1.98 / 1.88, Solana 77.2 / 36.5, Sui 0.18 / 0.22. In the Phase 4 run, Topology (the Phase 2 champion) ran at ×0.65 of the filtered Bitmap logic. Details, rounds, ablation and heuristics: `PHASE4_RESULTS.md`; plots `optimization_log/Phase8_*`.
+
+### Phase 2 results (2026-09-28; before = commit c9fdd2b code, after = Phase 2 code, run back to back on AC)
 
 Median per-block speed-up vs Bitmap **in the same run** (>1 = faster than Bitmap):
 
@@ -82,10 +113,11 @@ Where the old lead went (Bitmap ablation, same process): per-call allocation + 4
 
 | | |
 |---|---|
-| Live algorithms | `internal/algorithms/*.go` — Bitmap, IDBucket, NaiveParallel, NaiveSequential, Native, Topology; each declares its own knobs; island-family helpers + hub knobs in `island_shared.go` (see `ALGORITHMS.md`) |
+| Live algorithms | `internal/algorithms/` — `bitmap.go`, `id_bucket_construction.go`, `island_lean.go`, `island_lean_hub.go` (+ shared `island_shared.go`), `naive_sequential.go` (parity reference); `parity_test.go` (see `ALGORITHMS.md`) |
+| Proving ground | `ufarena.go` (`go run . -suite=uf`); extra hub rules in `internal/algorithms/uflab/hub_rules.go` |
 | Archived algorithms | `internal/algorithms/archive/` (build-ignored; README documents revival) |
-| Data model & scratch | `internal/model/` (`island_graph.go` = BlockTopology; `constants.go` = MaximumGraphSize 3000) |
+| Data model & scratch | `internal/model/` (`island_topology.go` = island output + forest + index + live accesses; `inverted_index.go` / `id_bucket.go` = Bitmap's and IDBucket's scratch; `constants.go` = MaximumGraphSize 3000); `internal/model/archive/` = BlockTopology, UnionFind |
 | Trace digestion | `internal/digestion/` (eth/solana parsers; `eth_hub_filter.go` no-hub trace generator; h5 extractors in Python) |
 | Harness | `main.go` (algorithm registry, `-algs`), `pipeline_utils.go`, `bench_platform_*.go`; pool in `internal/concurrency/worker_pool.go` |
-| Tuning | `tune_hyperparams.py` → `tuning_results.json` (Phase 2 short pass, 22 runs; gitignored) |
-| Analysis | `show_results.py`, `plot_metrics.py`, `trace_statistics.py` |
+| Tuning | `tune_hyperparams.py` → `tuning_results.json` (Bitmap and IDBucket knobs; gitignored); island knobs via the proving ground |
+| Analysis | `show_results.py` (`--league --baseline X` for the proving ground), `plot_metrics.py` (`--algs`), `trace_statistics.py` |

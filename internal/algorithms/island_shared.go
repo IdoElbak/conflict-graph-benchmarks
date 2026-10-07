@@ -1,162 +1,478 @@
 package algorithms
 
-import "conflict-graph-benchmarks/internal/model"
+import (
+	"runtime"
+	"sync/atomic"
+
+	"conflict-graph-benchmarks/internal/concurrency"
+	"conflict-graph-benchmarks/internal/model"
+)
 
 // ---------------------------------------------------------------------------
-// Hyper-parameters shared by the island family. Each algorithm's own knobs
-// (pairwise cut-off, sequential threshold) live in its own file;
-// tune_hyperparams.py rewrites these literals when re-tuning.
+// Knobs shared by the island algorithms (IslandLean, IslandLeanHub).
 // ---------------------------------------------------------------------------
 
-// ObjectHubThreshold is the per-object access count above which an object is
-// treated as a hub and bypassed by the Union-Find partition.
-const ObjectHubThreshold uint32 = 1000000000 //default: 50
-
-// HubToucherChunk is the number of hub touchers a worker claims at once in the
-// parallel hub phase.
-const HubToucherChunk = 64
-
-// ---------------------------------------------------------------------------
-// Shared front-half of the Native/Topology pipelines (BlockTopology-based).
-// ---------------------------------------------------------------------------
-
-// countAccessesAndDetectHubs tallies per-object accesses and registers a hub
-// the moment its count crosses ObjectHubThreshold.
-func countAccessesAndDetectHubs(block *model.Block, topo *model.BlockTopology) {
-	for txnIdx := range block.Transactions {
-		txn := &block.Transactions[txnIdx]
-		for _, objID := range txn.ReadSet {
-			topo.Counts[objID]++
-			if topo.Counts[objID] == ObjectHubThreshold+1 {
-				topo.IsHub[objID] = true
-				topo.HubObjs = append(topo.HubObjs, objID)
-			}
-		}
-		for _, objID := range txn.WriteSet {
-			topo.Counts[objID]++
-			if topo.Counts[objID] == ObjectHubThreshold+1 {
-				topo.IsHub[objID] = true
-				topo.HubObjs = append(topo.HubObjs, objID)
-			}
-		}
-	}
+// IslandConfig holds the knobs of the island algorithms. The proving ground
+// (`go run . -suite=uf`) times several configurations in one run.
+type IslandConfig struct {
+	PairwiseMax   int    // islands of 3..PairwiseMax (<= 64) members use pairwise HasConflict
+	SequentialMax uint32 // blocks of at most this many transactions run inline
+	ParallelWords int    // larger blocks run on the pool once their matrices hold this many words
+	SplitRows     uint32 // rows per parallel sweep unit of islands wider than 64
+	GroupTxns     int    // parallel path: small islands are claimed in groups of about this many members
 }
 
-// collectHubTouchers appends every transaction accessing a hub object to
-// topo.HubTouchers.
-func collectHubTouchers(block *model.Block, topo *model.BlockTopology, n uint32) {
-	for txnIdx := uint32(0); txnIdx < n; txnIdx++ {
-		txn := &block.Transactions[txnIdx]
-		touchesHub := false
-		for _, objID := range txn.WriteSet {
-			if topo.IsHub[objID] {
-				touchesHub = true
-				break
-			}
-		}
-		if !touchesHub {
-			for _, objID := range txn.ReadSet {
-				if topo.IsHub[objID] {
-					touchesHub = true
-					break
-				}
-			}
-		}
-		if touchesHub {
-			topo.HubTouchers = append(topo.HubTouchers, txnIdx)
-		}
-	}
+// DefaultIslandConfig holds the knobs the Phase 4 proving ground picked.
+var DefaultIslandConfig = IslandConfig{
+	PairwiseMax:   4,
+	SequentialMax: 300,
+	ParallelWords: 8000,
+	SplitRows:     16,
+	GroupTxns:     256,
 }
 
-// partitionViaAnchors runs the star-topology Union-Find in two O(accesses)
-// passes over the raw access sets: writers claim/join each non-hub object's
-// anchor, then readers join anchored objects. Read-only objects never union.
-func partitionViaAnchors(block *model.Block, topo *model.BlockTopology) {
-	for txnIdx := range block.Transactions {
-		tIdx := uint32(txnIdx)
-		for _, objID := range block.Transactions[txnIdx].WriteSet {
-			if topo.IsHub[objID] {
+// ---------------------------------------------------------------------------
+// Per-object anchors: the partition's state, and what makes an object live.
+// ---------------------------------------------------------------------------
+
+// Per-object anchor encoding:
+//
+//	0                     never written (so far)
+//	[1, sharedBit)        root+1 of its first writer; no second transaction yet
+//	[sharedBit, hubBase)  the same | sharedBit: a second transaction touched it
+//	[hubBase, ...)        hub object number hubBase+h, kept out of the partition
+//
+// Only live objects (shared and not hubs) can produce an island edge: a read
+// of a never-written object conflicts with nobody, and neither does a written
+// object no second transaction touches.
+const (
+	sharedBit uint32 = 1 << 30
+	hubBase   uint32 = 1 << 31
+)
+
+// noRoot marks a transaction root not looked up yet.
+const noRoot = ^uint32(0)
+
+// liveBit is 1 for a live anchor (in [sharedBit, hubBase): top bits 01) and
+// 0 otherwise, computed without a branch.
+func liveBit(anchor uint32) int {
+	top := anchor >> 30
+	return int(top & 1 &^ (top >> 1))
+}
+
+// join unions root with the set of the object anchored at a (not a hub) and
+// returns the new root of the current transaction.
+func join(f *model.IslandForest, root, a uint32) uint32 {
+	if other := f.Find(a&^sharedBit - 1); other != root {
+		return f.Link(other, root)
+	}
+	return root
+}
+
+// partitionByAnchors unions every transaction with the first writer of each
+// object it writes, then of each object it reads, in two passes over the
+// accesses, and marks every object a second transaction touches as shared.
+// Reads of never-written objects union nothing. anchor must be all-zero on
+// entry. Each transaction's root is tracked across its own accesses, so a
+// union costs one Find, not two.
+func partitionByAnchors(block *model.Block, f *model.IslandForest, anchor []uint32) {
+	txns := block.Transactions
+	for t := range txns {
+		// Nobody has joined t yet: anchors only ever name earlier sets.
+		root := uint32(t)
+		for _, obj := range txns[t].WriteSet {
+			a := anchor[obj]
+			if a == 0 {
+				anchor[obj] = root + 1
 				continue
 			}
-			if anchor := topo.AnchorOf[objID]; anchor == 0 {
-				topo.AnchorOf[objID] = tIdx + 1
-			} else {
-				topo.Union(anchor-1, tIdx)
-			}
+			anchor[obj] = a | sharedBit
+			root = join(f, root, a)
 		}
 	}
-	for txnIdx := range block.Transactions {
-		tIdx := uint32(txnIdx)
-		for _, objID := range block.Transactions[txnIdx].ReadSet {
-			if topo.IsHub[objID] {
+	for t := range txns {
+		root := noRoot // looked up on the first live read only
+		for _, obj := range txns[t].ReadSet {
+			a := anchor[obj]
+			if a == 0 {
 				continue
 			}
-			if anchor := topo.AnchorOf[objID]; anchor != 0 {
-				topo.Union(anchor-1, tIdx)
+			anchor[obj] = a | sharedBit
+			if root == noRoot {
+				root = f.Find(uint32(t))
 			}
+			root = join(f, root, a)
 		}
 	}
-}
-
-// planIslandWork lists the work units of the parallel per-island phase: every
-// island whole, except sweep islands (larger than pairwiseMax) with more than
-// splitRows rows, which are cut into row ranges of splitRows. Once the index
-// is built their rows are independent, so one giant island no longer bounds
-// the phase. Pairwise islands stay whole: they write both rows of each pair.
-func planIslandWork(topo *model.BlockTopology, pairwiseMax int, splitRows uint32) {
-	units := topo.WorkUnits[:0]
-	for islandIdx, island := range topo.Islands {
-		k := uint32(len(island))
-		step := k
-		if len(island) > pairwiseMax && k > splitRows {
-			step = splitRows
-		}
-		for lo := uint32(0); lo < k; lo += step {
-			units = append(units, model.IslandSpan{Island: uint32(islandIdx), Lo: lo, Hi: min(lo+step, k)})
-		}
-	}
-	topo.WorkUnits = units
 }
 
 // ---------------------------------------------------------------------------
-// Pairwise island helpers and statistics.
+// The island half of both algorithms: islands, dispatch, parallel path.
 // ---------------------------------------------------------------------------
 
-// processSingleIsland executes a sequential, pairwise conflict check within an isolated transaction island
-func processSingleIsland(island []uint32, block *model.Block, graph *model.ConflictGraph) {
-	islandSize := len(island)
-	for i := 0; i < islandSize; i++ {
-		for j := i + 1; j < islandSize; j++ {
-			recordConflictIfPresent(island[i], island[j], block, graph)
-		}
-	}
+// islandCore holds what IslandLean and IslandLeanHub share: the output, the
+// per-object anchors, the union-find forest and the per-island construction
+// of the local matrices. All scratch is reused; steady-state calls allocate
+// nothing.
+type islandCore struct {
+	cfg    IslandConfig
+	out    model.IslandTopology
+	forest model.IslandForest
+	anchor []uint32
+	index  model.IslandIndex
+	live   model.LiveAccesses
+
+	localWords int    // words of the carved local matrices
+	stride     uint32 // index row stride of the parallel path
+
+	// Parallel path scratch.
+	workerIndex []model.IslandIndex  // per-worker one-word index for small islands
+	workerLive  []model.LiveAccesses // per-worker compaction scratch for small islands
+	wideLive    []model.LiveAccesses // per wide island, kept from build to wipe
+	order       []uint32             // wide islands, then small islands
+	units       []islandUnit         // claims of the single pool pass
+	built       []atomic.Bool        // per wide island: index rows complete
+	extraUnits  []islandUnit         // the algorithm's own independent units (IslandLeanHub: hub rows)
+	extraRun    func(lo, hi uint32)
 }
 
-// recordConflictIfPresent enforces symmetry constraints and records the edge
-func recordConflictIfPresent(txnA, txnB uint32, block *model.Block, graph *model.ConflictGraph) {
-	if txnA > txnB {
-		txnA, txnB = txnB, txnA
-	}
-	if block.Transactions[txnA].HasConflict(&block.Transactions[txnB]) {
-		graph.AddEdge(txnA, txnB)
-		graph.AddEdge(txnB, txnA)
-	}
+// Topology returns the output of the last Run.
+func (c *islandCore) Topology() *model.IslandTopology {
+	return &c.out
 }
 
-// CalculateIslandStats returns (islandCount, maxIslandSize, avgIslandSize)
-func CalculateIslandStats(islands [][]uint32) (int, int, float64) {
-	count := len(islands)
-	if count == 0 {
+// begin resets the output, the anchors and the forest for a new block.
+func (c *islandCore) begin(block *model.Block) {
+	c.out.Reset()
+	c.anchor = model.Resize(c.anchor, int(block.NumUniqueObjects))
+	clear(c.anchor)
+	c.forest.Reset(uint32(len(block.Transactions)))
+}
+
+// buildIslands reads the islands off the partitioned forest and builds their
+// local matrices; it returns (islands, largest, mean size).
+func (c *islandCore) buildIslands(block *model.Block) (int, int, float64) {
+	count, largest, mean := c.collect(block)
+	c.build(block, c.parallel(block, c.localWords))
+	return count, largest, mean
+}
+
+// collect reads the islands off the partitioned forest and carves their local
+// matrices; it returns (islands, largest, mean size).
+func (c *islandCore) collect(block *model.Block) (int, int, float64) {
+	inIslands, largest := c.out.GroupIslands(&c.forest, uint32(len(block.Transactions)))
+	c.localWords = c.out.CarveLocalGraphs()
+	c.stride = max(1, model.WordsPerRow(uint32(largest)))
+	if len(c.out.Islands) == 0 {
 		return 0, 0, 0
 	}
-	maxSize := 0
-	sumSize := 0
-	for _, isl := range islands {
-		sz := len(isl)
-		if sz > maxSize {
-			maxSize = sz
-		}
-		sumSize += sz
+	return len(c.out.Islands), largest, float64(inIslands) / float64(len(c.out.Islands))
+}
+
+// parallel reports whether the block takes the parallel path: more than
+// SequentialMax transactions and matrices of at least ParallelWords words to
+// build (their size tracks the sweep work, which is what parallelizes).
+func (c *islandCore) parallel(block *model.Block, words int) bool {
+	return uint32(len(block.Transactions)) > c.cfg.SequentialMax && words >= c.cfg.ParallelWords
+}
+
+// build builds the collected islands, inline or on the worker pool.
+func (c *islandCore) build(block *model.Block, parallel bool) {
+	c.index.Prepare(block.NumUniqueObjects, c.stride)
+	if parallel {
+		c.buildParallel(block.Transactions)
+	} else {
+		c.buildSequential(block.Transactions)
 	}
-	return count, maxSize, float64(sumSize) / float64(count)
+}
+
+// buildSequential builds every island inline. Each island is wiped before the
+// next starts, so every island can use its own row stride.
+func (c *islandCore) buildSequential(txns []model.Transaction) {
+	for i, island := range c.out.Islands {
+		local := c.out.LocalGraphs[i]
+		switch k := uint32(len(island)); {
+		case k == 2:
+			pairEdge(local)
+		case int(k) <= c.cfg.PairwiseMax:
+			pairwiseIsland(txns, island, local)
+		case k <= 64:
+			compactLive(&c.live, txns, island, c.anchor)
+			narrowIsland(&c.live, local, &c.index, 1)
+		default:
+			width := c.out.LocalWidths[i]
+			compactLive(&c.live, txns, island, c.anchor)
+			buildWide(&c.live, 0, k, &c.index, width)
+			sweepWide(&c.live, 0, k, local, width, &c.index, width)
+			wipeWide(&c.live, 0, k, &c.index, width)
+		}
+	}
+}
+
+// islandUnit kinds: the units of the parallel path.
+const (
+	unitExtra = iota // the algorithm's own work, range [lo, hi) of extraRun
+	unitBuild        // index rows of wide island a
+	unitSmall        // small islands order[lo:hi], end to end
+	unitSweep        // rows [lo, hi) of wide island a, once its rows are built
+)
+
+// islandUnit is one claim of the parallel path.
+type islandUnit struct {
+	kind      uint8
+	a, lo, hi uint32
+}
+
+// buildParallel builds the islands in a single pass of the worker pool (each
+// extra pass costs a wake-up of the parked workers). Units are claimed in
+// order: the wide islands' index builds (longest first); the algorithm's own
+// independent units; the small islands, in groups of about GroupTxns members,
+// each built end to end on the worker's own one-word index so no two workers
+// share a cache line of it; last, the wide islands' rows in SplitRows ranges,
+// each waiting for its island's build. The wide rows are wiped afterwards.
+func (c *islandCore) buildParallel(txns []model.Transaction) {
+	c.prepareWorkers()
+	numWide := c.orderIslands()
+	c.planUnits(numWide)
+
+	islands, graphs, widths := c.out.Islands, c.out.LocalGraphs, c.out.LocalWidths
+	order, units, stride := c.order, c.units, c.stride
+	concurrency.ParallelFor(len(units), 1, func(worker, lo, hi int) {
+		for _, u := range units[lo:hi] {
+			switch u.kind {
+			case unitExtra:
+				c.extraRun(u.lo, u.hi)
+			case unitBuild:
+				island := islands[order[u.a]]
+				compactLive(&c.wideLive[u.a], txns, island, c.anchor)
+				buildWide(&c.wideLive[u.a], 0, uint32(len(island)), &c.index, stride)
+				c.built[u.a].Store(true)
+			case unitSmall:
+				for _, i := range order[u.lo:u.hi] {
+					c.buildSmall(txns, islands[i], graphs[i], worker)
+				}
+			case unitSweep:
+				for !c.built[u.a].Load() {
+					runtime.Gosched()
+				}
+				i := order[u.a]
+				sweepWide(&c.wideLive[u.a], u.lo, u.hi, graphs[i], widths[i], &c.index, stride)
+			}
+		}
+	})
+
+	for j := range numWide {
+		wipeWide(&c.wideLive[j], 0, uint32(len(islands[order[j]])), &c.index, stride)
+	}
+}
+
+// prepareWorkers sizes every worker's one-word index for the block.
+func (c *islandCore) prepareWorkers() {
+	if workers := runtime.GOMAXPROCS(0); len(c.workerIndex) < workers {
+		c.workerIndex = make([]model.IslandIndex, workers)
+		c.workerLive = make([]model.LiveAccesses, workers)
+	}
+	for w := range c.workerIndex {
+		c.workerIndex[w].Prepare(uint32(len(c.anchor)), 1)
+	}
+}
+
+// orderIslands lists the islands wider than 64 first, then the rest, readies
+// one build flag and access list per wide island, and returns their number.
+func (c *islandCore) orderIslands() int {
+	c.order = c.order[:0]
+	for i, island := range c.out.Islands {
+		if len(island) > 64 {
+			c.order = append(c.order, uint32(i))
+		}
+	}
+	numWide := len(c.order)
+	for i, island := range c.out.Islands {
+		if len(island) <= 64 {
+			c.order = append(c.order, uint32(i))
+		}
+	}
+	for len(c.wideLive) < numWide {
+		c.wideLive = append(c.wideLive, model.LiveAccesses{})
+	}
+	if len(c.built) < numWide {
+		c.built = make([]atomic.Bool, numWide)
+	}
+	for j := range numWide {
+		c.built[j].Store(false)
+	}
+	return numWide
+}
+
+// planUnits lists the claims of the pool pass, in claim order.
+func (c *islandCore) planUnits(numWide int) {
+	islands := c.out.Islands
+	c.units = c.units[:0]
+	for j := range numWide {
+		c.units = append(c.units, islandUnit{kind: unitBuild, a: uint32(j)})
+	}
+	c.units = append(c.units, c.extraUnits...)
+	for lo := numWide; lo < len(c.order); {
+		hi, size := lo, 0
+		for hi == lo || hi < len(c.order) && size < c.cfg.GroupTxns {
+			size += len(islands[c.order[hi]])
+			hi++
+		}
+		c.units = append(c.units, islandUnit{kind: unitSmall, lo: uint32(lo), hi: uint32(hi)})
+		lo = hi
+	}
+	for j := range numWide {
+		k := uint32(len(islands[c.order[j]]))
+		for lo := uint32(0); lo < k; lo += c.cfg.SplitRows {
+			c.units = append(c.units, islandUnit{kind: unitSweep, a: uint32(j), lo: lo, hi: min(lo+c.cfg.SplitRows, k)})
+		}
+	}
+}
+
+// buildSmall builds an island of at most 64 members end to end on the
+// worker's own index.
+func (c *islandCore) buildSmall(txns []model.Transaction, island []uint32, local []uint64, worker int) {
+	switch k := len(island); {
+	case k == 2:
+		pairEdge(local)
+	case k <= c.cfg.PairwiseMax:
+		pairwiseIsland(txns, island, local)
+	default:
+		compactLive(&c.workerLive[worker], txns, island, c.anchor)
+		narrowIsland(&c.workerLive[worker], local, &c.workerIndex[worker], 1)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Per-island kernels.
+// ---------------------------------------------------------------------------
+
+// pairEdge writes the matrix of a two-member island: transactions are only
+// ever unioned through a direct W-W or W-R share, so it is one edge.
+func pairEdge(local []uint64) {
+	local[0], local[1] = 2, 1
+}
+
+// pairwiseIsland checks every pair of a small island (at most 64 members)
+// directly with HasConflict.
+func pairwiseIsland(txns []model.Transaction, island []uint32, local []uint64) {
+	clear(local)
+	for i := range island {
+		for j := i + 1; j < len(island); j++ {
+			if txns[island[i]].HasConflict(&txns[island[j]]) {
+				local[i] |= 1 << j
+				local[j] |= 1 << i
+			}
+		}
+	}
+}
+
+// compactLive gathers the live accesses of the island's members into la.
+// Every access is stored and the cursor advances by its live bit, so nothing
+// branches on liveness: the build, sweep and wipe that follow run check-free
+// over the accesses that can produce an edge.
+func compactLive(la *model.LiveAccesses, txns []model.Transaction, island []uint32, anchor []uint32) {
+	nw, nr := 0, 0
+	for _, t := range island {
+		nw += len(txns[t].WriteSet)
+		nr += len(txns[t].ReadSet)
+	}
+	la.W, la.R = model.Resize(la.W, nw), model.Resize(la.R, nr)
+	la.WEnd, la.REnd = model.Resize(la.WEnd, len(island)), model.Resize(la.REnd, len(island))
+	nw, nr = 0, 0
+	for p, t := range island {
+		for _, obj := range txns[t].WriteSet {
+			la.W[nw] = obj
+			nw += liveBit(anchor[obj])
+		}
+		la.WEnd[p] = uint32(nw)
+		for _, obj := range txns[t].ReadSet {
+			la.R[nr] = obj
+			nr += liveBit(anchor[obj])
+		}
+		la.REnd[p] = uint32(nr)
+	}
+}
+
+// narrowIsland builds, sweeps and wipes the one-word index rows of an island
+// of at most 64 members (rows at obj*stride), writing its local matrix: a
+// written object contributes its writers and readers, a read one its writers.
+func narrowIsland(la *model.LiveAccesses, local []uint64, idx *model.IslandIndex, stride uint32) {
+	writers, readers := idx.Writers, idx.Readers
+	k := uint32(len(local))
+	for p := range k {
+		bit := uint64(1) << p
+		for _, obj := range la.Writes(p) {
+			writers[obj*stride] |= bit
+		}
+		for _, obj := range la.Reads(p) {
+			readers[obj*stride] |= bit
+		}
+	}
+	for p := range k {
+		var row uint64
+		for _, obj := range la.Writes(p) {
+			row |= writers[obj*stride] | readers[obj*stride]
+		}
+		for _, obj := range la.Reads(p) {
+			row |= writers[obj*stride]
+		}
+		local[p] = row &^ (1 << p)
+	}
+	// Every live read is of an object a member writes: clearing both rows of
+	// the live writes clears all the build set.
+	for _, obj := range la.W[:la.WEnd[k-1]] {
+		writers[obj*stride] = 0
+		readers[obj*stride] = 0
+	}
+}
+
+// buildWide sets the index bits of members [lo, hi) of an island wider than
+// 64 (rows of stride words at obj*stride).
+func buildWide(la *model.LiveAccesses, lo, hi uint32, idx *model.IslandIndex, stride uint32) {
+	for p := lo; p < hi; p++ {
+		word, bit := p/64, uint64(1)<<(p%64)
+		for _, obj := range la.Writes(p) {
+			idx.Writers[obj*stride+word] |= bit
+		}
+		for _, obj := range la.Reads(p) {
+			idx.Readers[obj*stride+word] |= bit
+		}
+	}
+}
+
+// sweepWide writes rows [lo, hi) of a wide island's local matrix (width words
+// each) as the OR of the index rows its members conflict through.
+func sweepWide(la *model.LiveAccesses, lo, hi uint32, local []uint64, width uint32, idx *model.IslandIndex, stride uint32) {
+	for p := lo; p < hi; p++ {
+		row := local[p*width : (p+1)*width]
+		clear(row)
+		for _, obj := range la.Writes(p) {
+			writers := idx.Writers[obj*stride:][:len(row)]
+			readers := idx.Readers[obj*stride:][:len(row)]
+			for i := range row {
+				row[i] |= writers[i] | readers[i]
+			}
+		}
+		for _, obj := range la.Reads(p) {
+			writers := idx.Writers[obj*stride:][:len(row)]
+			for i := range row {
+				row[i] |= writers[i]
+			}
+		}
+		row[p/64] &^= 1 << (p % 64)
+	}
+}
+
+// wipeWide clears exactly the words buildWide set for members [lo, hi).
+func wipeWide(la *model.LiveAccesses, lo, hi uint32, idx *model.IslandIndex, stride uint32) {
+	for p := lo; p < hi; p++ {
+		word := p / 64
+		for _, obj := range la.Writes(p) {
+			idx.Writers[obj*stride+word] = 0
+		}
+		for _, obj := range la.Reads(p) {
+			idx.Readers[obj*stride+word] = 0
+		}
+	}
 }

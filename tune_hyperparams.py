@@ -1,4 +1,4 @@
-"""Short hyperparameter tuning pass for every benchmarked algorithm.
+"""Short hyperparameter tuning pass for the row algorithms (Bitmap, IDBucket).
 
 One command, resumable, re-runnable on other hardware:
     python tune_hyperparams.py            run / resume, then write the winners into the sources
@@ -6,25 +6,25 @@ One command, resumable, re-runnable on other hardware:
     python tune_hyperparams.py --report   print the choices from saved results
     python tune_hyperparams.py --check    verify every knob regex matches its source once
 
-Each run rewrites the knob literals in the Go sources, runs `go run . -algs=...`
-(full benchmark on all six traces, parity-verified against NaiveSequential)
-and stores every per-block time plus the run's [Platform] line in
-tuning_results.json. Every algorithm has its own knobs and one algorithm's
-knobs never change another's timing, so one run can test a different value
-for each algorithm at once.
+The island algorithms (IslandLean, IslandLeanHub) are not tuned here: their
+knobs are a run-time config, so the proving ground times their settings side
+by side in one run (`go run . -suite=uf`, registry in ufarena.go).
+
+Each run rewrites the knob literals in the Go sources, runs
+`go run . -algs=Bitmap,IDBucket` (all six traces, parity-verified against
+NaiveSequential) and stores every per-block time plus the run's [Platform]
+line in tuning_results.json.
 
 Stages (each derived only from the results before it, so a rerun resumes):
-  1. parallel runs: every sequential threshold 0 (always parallel), one run per
-     chunk size; sequential runs: every threshold at the maximum, one run per
-     island pairwise cut-off (the non-island algorithms repeat, which measures
-     run-to-run noise).
-  2. per algorithm: best chunk, best pairwise cut-off, and the sequential
-     threshold chosen block by block from the parallel vs sequential times;
-     then a coarse hub-threshold scan for the island algorithms.
-  3. validation run of the chosen config plus neighbour runs (thresholds x0.5
-     and x2, pairwise cut-offs between the tested values); a neighbour replaces
-     the stage-2 value only if it wins by more than NOISE_MARGIN against a run
-     with the same mix of algorithms.
+  1. parallel runs: both sequential thresholds 0 (always parallel), one run per
+     chunk size; sequential runs: both thresholds at the maximum, repeated
+     SEQUENTIAL_REPEATS times (interleaved with the parallel runs; the repeats
+     also measure run-to-run noise).
+  2. per algorithm: the best chunk and the sequential threshold chosen block by
+     block from the parallel vs the median sequential times; then a validation
+     run of that choice plus neighbour runs (thresholds x0.5 and x2). A
+     neighbour replaces the stage-1 value only if it wins by more than
+     NOISE_MARGIN.
 Score of an algorithm in a run = geometric mean over the six traces of the
 geometric mean per-block time (every trace and every block weigh the same).
 The winners are written into the sources at the end (--no-apply to skip).
@@ -55,17 +55,12 @@ ALG_DIR = os.path.join(REPO_DIR, "internal", "algorithms")
 
 TRACES = ["Ethereum", "EthereumNoHub", "Solana", "Sui", "YCSB", "TPC"]
 MAX_THRESHOLD = 3000  # = model.MaximumGraphSize: "always sequential"
-HUB_OFF = 10**9
 
 # knob -> (file, regex with one capture group for the prefix)
 KNOBS = {}
 for _file, _names in {
     "bitmap.go": ["BitmapSequentialMax", "BitmapChunkRows"],
     "id_bucket_construction.go": ["IDBucketSequentialMax", "IDBucketChunkRows"],
-    "naive_parallel.go": ["NaiveParallelSequentialMax", "NaiveParallelChunkRows"],
-    "island_native_shattered.go": ["NativePairwiseMax", "NativeSequentialMax", "NativeSplitRows"],
-    "island_topology_shattered.go": ["TopologyPairwiseMax", "TopologySequentialMax", "TopologySplitRows"],
-    "island_shared.go": ["ObjectHubThreshold"],
 }.items():
     for _name in _names:
         KNOBS[_name] = (os.path.join(ALG_DIR, _file),
@@ -75,32 +70,23 @@ for _file, _names in {
 ALGS = {
     "Bitmap": {"seq": "BitmapSequentialMax", "chunk": "BitmapChunkRows"},
     "IDBucket": {"seq": "IDBucketSequentialMax", "chunk": "IDBucketChunkRows"},
-    "NaiveParallel": {"seq": "NaiveParallelSequentialMax", "chunk": "NaiveParallelChunkRows"},
-    "IslandNativeShattered": {"seq": "NativeSequentialMax", "pw": "NativePairwiseMax",
-                              "chunk": "NativeSplitRows"},
-    "IslandTopologyShattered": {"seq": "TopologySequentialMax", "pw": "TopologyPairwiseMax",
-                                "chunk": "TopologySplitRows"},
 }
-ISLAND_ALGS = ["IslandNativeShattered", "IslandTopologyShattered"]
-ROW_ALGS = ["Bitmap", "IDBucket"]
 
-ROW_CHUNKS = [16, 64, 256]
-NAIVE_CHUNKS = [2, 8, 32]
-PAIRWISE = [64, 2, 4, 8, 16, 24, 32, 48]
-HUBS = [20, 50, 150, 500, 2000]
+CHUNKS = [16, 64, 256]
+SEQUENTIAL_REPEATS = 3
 
-GO_RUN_TIMEOUT_SEC = 3 * 3600
+GO_RUN_TIMEOUT_SEC = 3600
 
 # Whole-run scores of an unchanged algorithm drift by up to ~x1.1 between runs
-# on the development laptop, so stage 3 only overrides a stage-2 choice that
+# on the development laptop, so stage 2 only overrides a stage-1 choice that
 # the neighbour beats by more than this factor.
 NOISE_MARGIN = 1.05
 
 
 # --- run plan -------------------------------------------------------------------
 
-def run_spec(name, stage, config, algs):
-    return {"name": name, "stage": stage, "config": config, "algs": algs}
+def run_spec(name, stage, config):
+    return {"name": name, "stage": stage, "config": config, "algs": list(ALGS)}
 
 
 def all_seq(value):
@@ -108,75 +94,31 @@ def all_seq(value):
 
 
 def stage1():
-    runs = []
-    for i, (row_chunk, naive_chunk) in enumerate(zip(ROW_CHUNKS, NAIVE_CHUNKS)):
-        cfg = {**all_seq(0), "ObjectHubThreshold": HUB_OFF,
-               "BitmapChunkRows": row_chunk, "IDBucketChunkRows": row_chunk,
-               "NativeSplitRows": row_chunk, "TopologySplitRows": row_chunk,
-               "NaiveParallelChunkRows": naive_chunk,
-               "NativePairwiseMax": 64, "TopologyPairwiseMax": 64}
-        runs.append(run_spec(f"P{i}-chunk{row_chunk}/{naive_chunk}", 1, cfg, list(ALGS)))
-    for i, pw in enumerate(PAIRWISE):
-        cfg = {**all_seq(MAX_THRESHOLD), "ObjectHubThreshold": HUB_OFF,
-               "NativePairwiseMax": pw, "TopologyPairwiseMax": pw}
-        algs = ROW_ALGS + ISLAND_ALGS
-        if i == 0:
-            algs = algs + ["NaiveSequential"]  # the sequential-mode time of NaiveParallel
-        runs.append(run_spec(f"S{i}-pw{pw}", 1, cfg, algs))
+    p_runs = [run_spec(f"P{i}-chunk{chunk}", 1, {**all_seq(0), **{ALGS[a]["chunk"]: chunk for a in ALGS}})
+              for i, chunk in enumerate(CHUNKS)]
+    s_runs = [run_spec(f"S{i}", 1, all_seq(MAX_THRESHOLD)) for i in range(SEQUENTIAL_REPEATS)]
     # Interleave P and S runs so slow thermal drift hits both modes alike.
-    p_runs, s_runs = runs[:len(ROW_CHUNKS)], runs[len(ROW_CHUNKS):]
-    return [r for pair in zip(p_runs, s_runs) for r in pair] + s_runs[len(p_runs):]
+    return [r for pair in zip(p_runs, s_runs) for r in pair] + p_runs[len(s_runs):] + s_runs[len(p_runs):]
 
 
 def stage2(results):
-    choice = choose_stage1(results)
-    runs = []
-    for hub in HUBS:
-        cfg = {**choice["config"], "ObjectHubThreshold": hub}
-        runs.append(run_spec(f"H-hub{hub}", 2, cfg, ISLAND_ALGS))
-    return runs
-
-
-def stage3(results):
-    choice = choose_stage2(results)
-    cfg = choice["config"]
-    runs = [run_spec("V-chosen", 3, cfg, list(ALGS))]
+    cfg = choose_stage1(results)["config"]
+    runs = [run_spec("V-chosen", 2, cfg)]
     for factor, label in ((0.5, "half"), (2, "double")):
         scaled = {**cfg}
         for a in ALGS:
             knob = ALGS[a]["seq"]
             if 0 < cfg[knob] < MAX_THRESHOLD:
                 scaled[knob] = min(MAX_THRESHOLD, max(1, int(cfg[knob] * factor)))
-        runs.append(run_spec(f"V-seq-{label}", 3, scaled, list(ALGS)))
-    runs.append(run_spec("V-pw-center", 3, cfg, ISLAND_ALGS))  # same load mix as its neighbours
-    for side in ("lower", "upper"):
-        pw_cfg = {**cfg}
-        for a in ISLAND_ALGS:
-            knob = ALGS[a]["pw"]
-            pw_cfg[knob] = pairwise_neighbour(cfg[knob], side)
-        runs.append(run_spec(f"V-pw-{side}", 3, pw_cfg, ISLAND_ALGS))
+        runs.append(run_spec(f"V-seq-{label}", 2, scaled))
     return runs
-
-
-def pairwise_neighbour(value, side):
-    """Midpoint between value and its neighbour among the tested cut-offs."""
-    tested = sorted(set(PAIRWISE))
-    i = tested.index(value)
-    j = i - 1 if side == "lower" else i + 1
-    if j == len(tested):
-        return value * 3 // 2  # the largest tested value won: look beyond it
-    if j < 0:
-        return value
-    return (value + tested[j]) // 2
 
 
 def build_plan(results):
     """Every stage whose inputs are complete, in order."""
     plan = stage1()
-    for next_stage in (stage2, stage3):
-        if not all(r["name"] in results["runs"] for r in plan):
-            break
-        plan += next_stage(results)
+    if all(r["name"] in results["runs"] for r in plan):
+        plan += stage2(results)
     return plan
 
 
@@ -237,66 +179,38 @@ def best_threshold(sizes, seq_times, par_times):
 
 
 def choose_stage1(results):
-    """Chunk, pairwise cut-off and sequential threshold per algorithm."""
+    """Chunk and sequential threshold per algorithm."""
     p_runs = [r["name"] for r in stage1() if r["name"].startswith("P")]
     s_runs = [r["name"] for r in stage1() if r["name"].startswith("S")]
     sizes = results["sizes"]
-    cfg = {"ObjectHubThreshold": HUB_OFF}
-    why = {}
+    largest = max(n for tr in sizes for n in sizes[tr])
+    cfg, why = {}, {}
     for alg, knobs in ALGS.items():
-        if alg in ISLAND_ALGS:
-            best_s = best_run(results, s_runs, alg)
-            cfg[knobs["pw"]] = results["runs"][best_s]["config"][knobs["pw"]]
-            seq_times = run_times(results, "S0-pw64", alg)  # same cut-off as the P runs
-        elif alg == "NaiveParallel":
-            seq_times = run_times(results, "S0-pw64", "NaiveSequential")
-        else:
-            seq_times = median_times(results, s_runs, alg)
+        seq_times = median_times(results, s_runs, alg)
         # Chunk and threshold are chosen jointly: a large chunk alone would
         # "win" on small blocks just by leaving a single worker.
         _, threshold, best_p = min(best_threshold(sizes, seq_times, run_times(results, p, alg)) + (p,)
                                    for p in p_runs)
         cfg[knobs["chunk"]] = results["runs"][best_p]["config"][knobs["chunk"]]
         # Sequential up to the largest measured block = never parallel here.
-        largest = max(n for tr in sizes for n in sizes[tr])
         cfg[knobs["seq"]] = MAX_THRESHOLD if threshold >= largest else threshold
-        why[alg] = f"chunk from {best_p}" + (f", pw from {best_s}" if alg in ISLAND_ALGS else "")
+        why[alg] = f"chunk from {best_p}"
     return {"config": cfg, "why": why}
 
 
-def choose_stage2(results):
-    """Stage-1 choice plus the hub threshold of the island family."""
-    choice = choose_stage1(results)
-    s_best = {alg: best_run(results, [r["name"] for r in stage1() if r["name"].startswith("S")], alg)
-              for alg in ISLAND_ALGS}
-    # Hub off is represented by each algorithm's best sequential run; the shared
-    # hub knob is decided by Topology, the family's champion.
-    alg = "IslandTopologyShattered"
-    candidates = [(score(run_times(results, s_best[alg], alg)), HUB_OFF)]
-    for hub in HUBS:
-        t = run_times(results, f"H-hub{hub}", alg)
-        if t:
-            candidates.append((score(t), hub))
-    choice["config"]["ObjectHubThreshold"] = min(candidates)[1]
-    return choice
-
-
 def choose_final(results):
-    """Stage-2 choice, moved to a neighbour value only when the neighbour beats
-    it by more than NOISE_MARGIN in runs with the same load mix (a run's mix of
-    algorithms shifts every score in it, so only like runs are compared)."""
-    cfg = dict(choose_stage2(results)["config"])
-    centers = {"seq": "V-chosen", "pw": "V-pw-center"}
+    """Stage-1 choice, a threshold moved to a neighbour value only when the
+    neighbour beats it by more than NOISE_MARGIN."""
+    cfg = dict(choose_stage1(results)["config"])
     for alg, knobs in ALGS.items():
-        for kind, center in centers.items():
-            if kind not in knobs or not run_times(results, center, alg):
-                continue
-            best_score, best_value = score(run_times(results, center, alg)) / NOISE_MARGIN, cfg[knobs[kind]]
-            for name in (r["name"] for r in stage3(results) if r["name"].startswith(f"V-{kind}-")):
-                t = run_times(results, name, alg)
-                if t and name != center and score(t) < best_score:
-                    best_score, best_value = score(t), results["runs"][name]["config"][knobs[kind]]
-            cfg[knobs[kind]] = best_value
+        if not run_times(results, "V-chosen", alg):
+            continue
+        best_score, best_value = score(run_times(results, "V-chosen", alg)) / NOISE_MARGIN, cfg[knobs["seq"]]
+        for name in ("V-seq-half", "V-seq-double"):
+            t = run_times(results, name, alg)
+            if t and score(t) < best_score:
+                best_score, best_value = score(t), results["runs"][name]["config"][knobs["seq"]]
+        cfg[knobs["seq"]] = best_value
     return cfg
 
 
@@ -397,25 +311,23 @@ def print_report(results):
     platforms = {r["platform"] for r in runs.values()}
     for p in platforms:
         print(f"  {p}")
-    algs = list(ALGS) + ["NaiveSequential"]
-    print(f"\n{'run':<22}{'min':>6}" + "".join(f"{a.replace('Island', '').replace('Shattered', ''):>14}" for a in algs))
+    algs = list(ALGS)
+    print(f"\n{'run':<22}{'min':>6}" + "".join(f"{a:>14}" for a in algs))
     for name, run in runs.items():
         cells = "".join(f"{score(run['times'][a]):>14.5f}" if a in run["times"] else f"{'':>14}" for a in algs)
         print(f"{name:<22}{run['duration_sec'] / 60:>6.1f}{cells}")
 
-    # Run-to-run noise: the sequential runs repeat Bitmap and IDBucket unchanged.
+    # Run-to-run noise: the sequential runs repeat the same code unchanged.
     s_runs = [n for n in runs if n.startswith("S")]
-    for alg in ROW_ALGS:
+    for alg in ALGS:
         scores = [score(runs[n]["times"][alg]) for n in s_runs if alg in runs[n]["times"]]
         if len(scores) > 1:
             print(f"\n  noise, {alg} repeated {len(scores)}x: max/min score x{max(scores) / min(scores):.3f}")
 
     if all(r["name"] in runs for r in stage1()):
         print("\nStage-1 choice:", choose_stage1(results)["config"])
-    if all(r["name"] in runs for r in stage1() + stage2(results)):
-        print("Stage-2 choice:", choose_stage2(results)["config"])
     plan = build_plan(results)
-    if all(r["name"] in runs for r in plan) and any(r["stage"] == 3 for r in plan):
+    if all(r["name"] in runs for r in plan) and any(r["stage"] == 2 for r in plan):
         print("Final choice:  ", choose_final(results))
 
 

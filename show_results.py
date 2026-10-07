@@ -9,8 +9,13 @@ Tables (the text twin of plot_metrics.py):
   4. contention - synthetic traces only: median time per size band x density
                   level, so the point where each algorithm's curve bends shows.
 
-Usage: python show_results.py [results.json]
+  league        - (--league) one row per algorithm, one column per trace and
+                  synthetic density band: median per-block speedup vs the
+                  baseline and win rate; for the uf suite's many variants.
+
+Usage: python show_results.py [results.json] [--baseline ALG] [--league]
 """
+import argparse
 import json
 import math
 import statistics
@@ -145,7 +150,7 @@ def print_per_trace(by_trace, algs):
 
 
 def print_structure(by_trace):
-    print("\n=== 3. Structure: density, conflicted-txn ratio, Topology islands ===")
+    print("\n=== 3. Structure: density, conflicted-txn ratio, islands (IslandLean) ===")
     print(f"{'Trace':<27}{'density min/med/mean/p95/max':>36}{'<10%':>7}{'conflicted med/p95':>20}"
           f"{'med objs':>10}{'med isl':>9}{'largest/n':>11}")
     for label, title in TRACES:
@@ -155,7 +160,7 @@ def print_structure(by_trace):
             continue
         dens = sorted(b["density"] for b in blocks)
         conf = sorted(b.get("conflicted_txns_ratio", float("nan")) for b in blocks)
-        isl = [b.get("island_metrics", {}).get("IslandTopologyShattered") for b in blocks]
+        isl = [b.get("island_metrics", {}).get("IslandLean") for b in blocks]
         counts = [i["count"] if i else 0 for i in isl]
         shares = [i["max_size"] / b["num_txns"] for i, b in zip(isl, blocks) if i and b["num_txns"]]
         dens_txt = (f"{dens[0]:.4f}/{statistics.median(dens):.4f}/{statistics.fmean(dens):.4f}/"
@@ -165,6 +170,74 @@ def print_structure(by_trace):
               f"{statistics.median(b['unique_objects'] for b in blocks):>10.0f}"
               f"{statistics.median(counts):>9.0f}"
               f"{(statistics.median(shares) if shares else 0):>11.3f}")
+
+
+# Density bands of the synthetic traces in the league table.
+DENSITY_BANDS = [("<1%", 0.0, 0.01), ("1-10%", 0.01, 0.1), (">=10%", 0.1, 2.0)]
+
+
+def league_columns(by_trace):
+    """(label, blocks) per league column: every real trace whole, every
+    synthetic trace split into density bands."""
+    columns = []
+    for label, _ in TRACES:
+        blocks = by_trace.get(label, [])
+        if not blocks:
+            continue
+        if label not in SYNTHETIC:
+            columns.append((label, blocks))
+            continue
+        for band, lo, hi in DENSITY_BANDS:
+            cell = [b for b in blocks if lo <= b["density"] < hi]
+            if cell:
+                columns.append((f"{label}{band}", cell))
+    return columns
+
+
+def print_league(by_trace, algs):
+    columns = league_columns(by_trace)
+    print(f"\n=== League: median per-block speedup vs {BASELINE} (win rate); geo = geometric mean over the columns ===")
+    print(f"{'Algorithm':<30}" + "".join(f"{label:>13}" for label, _ in columns) + f"{'geo':>8}")
+    for alg in algs:
+        row, logs = f"{alg:<30}", []
+        for _, blocks in columns:
+            s = speedup(blocks, alg) if alg != BASELINE else None
+            if alg == BASELINE:
+                row += f"{'baseline':>13}"
+            elif s:
+                row += f"{'x%.2f %3.0f%%' % (s[0], 100.0 * s[1] / s[2]):>13}"
+                logs.append(math.log(s[0]))
+            else:
+                row += f"{'-':>13}"
+        row += f"{'x%.2f' % math.exp(statistics.fmean(logs)):>8}" if logs else f"{'':>8}"
+        print(row)
+    print("\n  median ms per block:")
+    print(f"{'Algorithm':<30}" + "".join(f"{label:>13}" for label, _ in columns))
+    for alg in algs:
+        row = f"{alg:<30}"
+        for _, blocks in columns:
+            vals = times(blocks, alg)
+            row += f"{statistics.median(vals):>13.5f}" if vals else f"{'-':>13}"
+        print(row)
+
+
+def print_island_league(by_trace, algs):
+    """Median island statistics per algorithm and trace (algorithms that record them)."""
+    print("\n=== Islands per trace: median count / median largest share of the block / txns in islands / hub-touched ===")
+    for label, title in TRACES:
+        blocks = [b for b in by_trace.get(label, []) if b["num_txns"] > 0]
+        if not blocks:
+            continue
+        print(f"  [{title}]")
+        for alg in algs:
+            stats = [(b["island_metrics"].get(alg), b["num_txns"]) for b in blocks]
+            if not any(s for s, _ in stats):
+                continue
+            count = statistics.median(s["count"] if s else 0 for s, _ in stats)
+            share = statistics.median((s["max_size"] if s else 0) / n for s, n in stats)
+            inisl = sum(s.get("in_islands", 0) if s else 0 for s, _ in stats) / sum(n for _, n in stats)
+            hub = sum(s.get("hub_touched", 0) if s else 0 for s, _ in stats) / sum(n for _, n in stats)
+            print(f"    {alg:<30}{count:>6.0f}{share:>8.3f}{inisl:>8.3f}{hub:>8.3f}")
 
 
 def print_contention(by_trace, algs):
@@ -194,14 +267,23 @@ def print_contention(by_trace, algs):
 
 
 if __name__ == "__main__":
-    path = sys.argv[1] if len(sys.argv) > 1 else "benchmark_results.json"
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("results", nargs="?", default="benchmark_results.json")
+    parser.add_argument("--baseline", default=BASELINE, help="algorithm the speedups are relative to")
+    parser.add_argument("--league", action="store_true", help="print the league and island tables only")
+    args = parser.parse_args()
+    BASELINE = args.baseline
     try:
-        by_trace = load_by_trace(path)
+        by_trace = load_by_trace(args.results)
     except FileNotFoundError:
-        print(f"{path} not found. Run the Go pipeline first.")
+        print(f"{args.results} not found. Run the Go pipeline first.")
         raise SystemExit(1)
 
     algs = algorithms_in(by_trace)
+    if args.league:
+        print_league(by_trace, algs)
+        print_island_league(by_trace, algs)
+        raise SystemExit(0)
     print_overview(by_trace, algs)
     print_per_trace(by_trace, algs)
     print_structure(by_trace)

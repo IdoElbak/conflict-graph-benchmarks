@@ -14,9 +14,11 @@ const IDBucketChunkRows = 64
 
 // IDBucketConstruction builds the conflict graph from per-object reader and
 // writer lists (the "optimized hash-map": object IDs are dense, so the map is
-// a CSR array). Each worker owns whole rows and sets one bit per conflicting
-// peer, so both triangles are written directly and no symmetry pass is needed.
-// bucket is reusable scratch; every row of graph is overwritten.
+// a CSR array). Reads of never-written objects never enter the lists, the
+// same filter the island algorithms use. Each worker owns whole rows and sets
+// one bit per conflicting peer, so both triangles are written directly and no
+// symmetry pass is needed. bucket is reusable scratch; every row of graph is
+// overwritten.
 func IDBucketConstruction(block *model.Block, graph *model.ConflictGraph, bucket *model.ObjectIdBucket) {
 	n := uint32(len(block.Transactions))
 	bucket.Build(block)

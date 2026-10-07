@@ -1,3 +1,5 @@
+//go:build ignore
+
 package model
 
 // UnionFind implements an optimized, flat-array disjoint-set

@@ -34,6 +34,14 @@ type IslandStat struct {
 	Count   int     `json:"count"`
 	MaxSize int     `json:"max_size"`
 	AvgSize float64 `json:"avg_size"`
+
+	// Recorded only by algorithms with a stats function (the island algorithms).
+	InIslands  int `json:"in_islands,omitempty"`  // transactions in an island
+	HubTouched int `json:"hub_touched,omitempty"` // transactions touching a hub object
+	Size2      int `json:"size_2,omitempty"`      // islands by size
+	Size3to8   int `json:"size_3_8,omitempty"`
+	Size9to64  int `json:"size_9_64,omitempty"`
+	SizeOver64 int `json:"size_over_64,omitempty"`
 }
 
 func runParsers(parsers []func() error) {
@@ -136,7 +144,8 @@ func processFile(filePath string, blockchain string, manager *model.Manager, all
 			blockchain, blocksProcessed, avgTxns, maxTxns)
 
 		fmt.Println("    --- Island Topology Statistics ---")
-		for _, algName := range []string{"IslandNativeShattered", "IslandTopologyShattered"} {
+		for _, alg := range algs {
+			algName := alg.name
 			var totalIslands, maxIslands, maxIslandSize int
 			var sumAvgSizes float64
 			var validBlocks int
@@ -158,7 +167,7 @@ func processFile(filePath string, blockchain string, manager *model.Manager, all
 			}
 
 			if validBlocks > 0 {
-				fmt.Printf("    [%-21s] Avg Islands: %6.1f | Max Islands: %4d | Avg Size: %6.1f | Max Size: %4d\n",
+				fmt.Printf("    [%-28s] Avg Islands: %6.1f | Max Islands: %4d | Avg Size: %6.1f | Max Size: %4d\n",
 					algName, float64(totalIslands)/float64(validBlocks), maxIslands, sumAvgSizes/float64(validBlocks), maxIslandSize)
 			}
 		}
@@ -213,7 +222,11 @@ func runAlgorithmsAndVerify(block *model.Block, algs []algorithm, oracle *model.
 		metrics.Times[alg.name] = timeAlgorithm(func() {
 			count, maxSz, avgSz = alg.run(block)
 		}).String()
-		if count > 0 {
+		if alg.stats != nil {
+			if stat := alg.stats(); stat.Count > 0 || stat.HubTouched > 0 {
+				metrics.IslandMetrics[alg.name] = stat
+			}
+		} else if count > 0 {
 			metrics.IslandMetrics[alg.name] = IslandStat{Count: count, MaxSize: maxSz, AvgSize: avgSz}
 		}
 		if alg.materialize != nil {

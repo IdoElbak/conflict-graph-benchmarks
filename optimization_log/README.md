@@ -5,6 +5,24 @@ Phases 0–6 (Ethereum + Solana only) were measured on the pre-2026-09-27 harnes
 ~1 ms clock on Windows, no power-throttling opt-out, mean of 500 calls; see `ANOMALIES.md`),
 so their absolute times are 1.5–2× too high and are not comparable with Phase 7.
 
+## Phase 8 — the Union-Find proving ground: IslandLean / IslandLeanHub (2026-10-01)
+
+`Phase8_uf_lean_by_size.png`, `Phase8_uf_lean_contention.png`: the definitive run after the
+Phase 4 cleanup (2026-10-02). It shows Bitmap and IDBucket, both with the Phase 4 access filters,
+and IslandLean and IslandLeanHub. Size bins are fitted per trace, there are no raw dots, and every
+panel has its own time axis in µs.
+
+The island algorithms were built in the Phase 4 proving ground (`go run . -suite=uf`, see
+`PHASE4_RESULTS.md`). IslandLeanHub vs Bitmap, median per-block speed-up in the same run:
+
+| Ethereum | Eth, fee hub removed | Solana | Sui | YCSB <1% / 1–10% / ≥10% | TPC <1% / 1–10% / ≥10% |
+|---|---|---|---|---|---|
+| ×0.97 | ×1.05 | ×1.93 | ×0.75 | ×2.55 / 1.21 / 0.74 | ×2.52 / 1.51 / 1.10 |
+
+The island family wins on large blocks and up to ~10% density (the crossover was ~1% in Phase 7). It
+ties on Ethereum and loses on ~10-transaction Sui blocks and on zipfian blocks above 10% density,
+where one island holds most of the block.
+
 ## Phase 7 — equalized baselines (2026-09-28)
 
 `Phase7_equalized_baselines_by_size.png`, `Phase7_equalized_baselines_contention.png`

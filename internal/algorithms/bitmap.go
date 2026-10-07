@@ -14,8 +14,10 @@ const BitmapChunkRows = 16
 
 // BitmapConstruction builds the full symmetric conflict matrix: each
 // transaction's row is the word-wide OR of the index rows it can conflict
-// through. index is reusable scratch, all-zero between calls. Every row of
-// graph is overwritten, so graph needs no clearing beforehand.
+// through. Only shared objects are swept (written, and touched by a second
+// transaction); the others cannot produce an edge, the same filter the island
+// algorithms use. index is reusable scratch, all-zero between calls. Every row
+// of graph is overwritten, so graph needs no clearing beforehand.
 func BitmapConstruction(block *model.Block, graph *model.ConflictGraph, index *model.ObjectInvertedIndex) {
 	n := uint32(len(block.Transactions))
 	index.Prepare(block.NumUniqueObjects, n)
@@ -34,8 +36,8 @@ func BitmapConstruction(block *model.Block, graph *model.ConflictGraph, index *m
 }
 
 // sweepBitmapRows writes rows [lo, hi) of graph straight into the output: a
-// written object contributes its writers and readers (W-W, W-R), a read object
-// its writers (R-W); the self bit is cleared last.
+// written shared object contributes its writers and readers (W-W, W-R), a read
+// one its writers (R-W); the self bit is cleared last.
 func sweepBitmapRows(block *model.Block, graph *model.ConflictGraph, index *model.ObjectInvertedIndex, lo, hi uint32) {
 	for txnIdx := lo; txnIdx < hi; txnIdx++ {
 		row := graph.Row(txnIdx)
@@ -43,6 +45,9 @@ func sweepBitmapRows(block *model.Block, graph *model.ConflictGraph, index *mode
 		txn := &block.Transactions[txnIdx]
 
 		for _, objID := range txn.WriteSet {
+			if !index.Shared(objID) {
+				continue
+			}
 			writers := index.GetObjectWriteSetBucket(objID)[:len(row)]
 			readers := index.GetObjectReadSetBucket(objID)[:len(row)]
 			for bIdx := range row {
@@ -50,6 +55,9 @@ func sweepBitmapRows(block *model.Block, graph *model.ConflictGraph, index *mode
 			}
 		}
 		for _, objID := range txn.ReadSet {
+			if !index.Shared(objID) {
+				continue
+			}
 			writers := index.GetObjectWriteSetBucket(objID)[:len(row)]
 			for bIdx := range row {
 				row[bIdx] |= writers[bIdx]
