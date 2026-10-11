@@ -1,3 +1,5 @@
+//go:build ignore
+
 package model
 
 // ObjectIdBucket lists, per object, the transactions that write it and, for

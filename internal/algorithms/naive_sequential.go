@@ -1,3 +1,8 @@
+// Package algorithms holds the parity reference, NaiveSequential, and the
+// parity test that checks every algorithm against it. The algorithms
+// themselves are in two families: competitors (matrix output: Bitmap,
+// SortJoin, HybridJoin) and islands (the Union-Find family); retired ones are
+// in archive/, build-ignored.
 package algorithms
 
 import "conflict-graph-benchmarks/internal/model"

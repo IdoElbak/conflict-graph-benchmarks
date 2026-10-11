@@ -61,8 +61,9 @@ func runParsers(parsers []func() error) {
 }
 
 // processFile streams all blocks from a single blockchain, times every selected
-// algorithm on each block, verifies parity, and collects metrics.
-func processFile(filePath string, blockchain string, manager *model.Manager, allMetrics *[]BlockMetrics, maxBlocks int, algs []algorithm) {
+// algorithm on each block, verifies parity, and collects metrics. copies holds
+// scratchCopies instances of the selected algorithms, all in the same order.
+func processFile(filePath string, blockchain string, manager *model.Manager, allMetrics *[]BlockMetrics, maxBlocks int, copies [][]algorithm) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		log.Printf(" -> [Warning] Could not open %s. Make sure digestion ran successfully.", filePath)
@@ -123,7 +124,7 @@ func processFile(filePath string, blockchain string, manager *model.Manager, all
 			Times:         make(map[string]string),
 		}
 
-		runAlgorithmsAndVerify(&block, algs, oracle, &metrics)
+		runAlgorithmsAndVerify(&block, copies, oracle, &metrics)
 
 		*allMetrics = append(*allMetrics, metrics)
 		blocksProcessed++
@@ -144,7 +145,7 @@ func processFile(filePath string, blockchain string, manager *model.Manager, all
 			blockchain, blocksProcessed, avgTxns, maxTxns)
 
 		fmt.Println("    --- Island Topology Statistics ---")
-		for _, alg := range algs {
+		for _, alg := range copies[0] {
 			algName := alg.name
 			var totalIslands, maxIslands, maxIslandSize int
 			var sumAvgSizes float64
@@ -176,8 +177,9 @@ func processFile(filePath string, blockchain string, manager *model.Manager, all
 }
 
 const (
-	// timingRounds x iterationsPerRound calls are timed per block and algorithm.
-	timingRounds       = 5
+	// scratchCopies instances of every algorithm are timed, one round of
+	// iterationsPerRound calls each, per block.
+	scratchCopies      = 9
 	iterationsPerRound = 100
 
 	// roundBudgetNanos caps one round's length: a call slower than
@@ -186,42 +188,51 @@ const (
 	roundBudgetNanos = 200_000_000
 )
 
-// timeAlgorithm returns the median per-call time over timingRounds rounds.
-// One untimed warm-up call and a GC come first, so every algorithm starts
-// warm and from the same heap state; the median of short rounds discards
-// rounds disturbed by an interrupt or core migration.
-func timeAlgorithm(run func()) time.Duration {
+// timeAlgorithm returns the median per-call time over one round on each of
+// an algorithm's scratch copies. A GC comes first, so every algorithm starts
+// from the same heap state, and each round follows an untimed warm-up call on
+// its copy, so it starts warm. The median discards rounds disturbed by an
+// interrupt or a core migration, and, because each round runs on scratch
+// memory placed elsewhere, it also averages out the placement: one instance's
+// placement biases its small-block times by up to ±15% for the whole run
+// (PHASE3_RESULTS.md §4).
+func timeAlgorithm(copies []func()) time.Duration {
 	start := nowNanos()
-	run()
+	copies[0]()
 	iterations := int(min(iterationsPerRound, max(1, roundBudgetNanos/max(1, nowNanos()-start))))
 	runtime.GC()
-	var rounds [timingRounds]int64
-	for r := range rounds {
+	rounds := make([]int64, len(copies))
+	for c, run := range copies {
+		run()
 		start := nowNanos()
 		for range iterations {
 			run()
 		}
-		rounds[r] = (nowNanos() - start) / int64(iterations)
+		rounds[c] = (nowNanos() - start) / int64(iterations)
 	}
-	slices.Sort(rounds[:])
-	return time.Duration(rounds[timingRounds/2])
+	slices.Sort(rounds)
+	return time.Duration(rounds[len(rounds)/2])
 }
 
-// runAlgorithmsAndVerify times every algorithm on the block and checks its
-// output bit-for-bit against NaiveSequential, the definitional pairwise
-// reference, which runs untimed once per block.
-func runAlgorithmsAndVerify(block *model.Block, algs []algorithm, oracle *model.ConflictGraph, metrics *BlockMetrics) {
+// runAlgorithmsAndVerify times every algorithm on the block, on all of its
+// scratch copies, and checks every copy's output bit-for-bit against
+// NaiveSequential, the definitional pairwise reference, which runs untimed
+// once per block.
+func runAlgorithmsAndVerify(block *model.Block, copies [][]algorithm, oracle *model.ConflictGraph, metrics *BlockMetrics) {
 	blockSize := uint32(len(block.Transactions))
 	metrics.IslandMetrics = make(map[string]IslandStat)
 
 	algorithms.NaiveSequential(block, oracle)
 
-	for _, alg := range algs {
+	runs := make([]func(), len(copies))
+	for i, alg := range copies[0] {
 		var count, maxSz int
 		var avgSz float64
-		metrics.Times[alg.name] = timeAlgorithm(func() {
-			count, maxSz, avgSz = alg.run(block)
-		}).String()
+		for c := range copies {
+			run := copies[c][i].run
+			runs[c] = func() { count, maxSz, avgSz = run(block) }
+		}
+		metrics.Times[alg.name] = timeAlgorithm(runs).String()
 		if alg.stats != nil {
 			if stat := alg.stats(); stat.Count > 0 || stat.HubTouched > 0 {
 				metrics.IslandMetrics[alg.name] = stat
@@ -229,11 +240,14 @@ func runAlgorithmsAndVerify(block *model.Block, algs []algorithm, oracle *model.
 		} else if count > 0 {
 			metrics.IslandMetrics[alg.name] = IslandStat{Count: count, MaxSize: maxSz, AvgSize: avgSz}
 		}
-		if alg.materialize != nil {
-			alg.materialize(blockSize)
-		}
-		if !oracle.AreGraphsEqual(alg.graph, blockSize) {
-			log.Fatalf("\n[FATAL ERROR] %s corrupted the graph on block %d!", alg.name, metrics.BlockNumber)
+		for c := range copies {
+			alg := copies[c][i]
+			if alg.materialize != nil {
+				alg.materialize(blockSize)
+			}
+			if !oracle.AreGraphsEqual(alg.graph, blockSize) {
+				log.Fatalf("\n[FATAL ERROR] %s (scratch copy %d) corrupted the graph on block %d!", alg.name, c, metrics.BlockNumber)
+			}
 		}
 	}
 

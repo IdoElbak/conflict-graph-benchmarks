@@ -1,7 +1,7 @@
 // Package uflab holds the experimental parts of the Union-Find proving ground
 // (`go run . -suite=uf`, registry in ufarena.go): hub rules that compete with
-// algorithms.PrefixHubs inside algorithms.IslandLeanHub. New island
-// heuristics are tried here first; a winner moves to internal/algorithms.
+// islands.PrefixHubs inside islands.IslandLeanHub. New island heuristics are
+// tried here first; a winner moves to package islands.
 package uflab
 
 import "conflict-graph-benchmarks/internal/model"

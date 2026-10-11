@@ -1,4 +1,6 @@
-package algorithms
+//go:build ignore
+
+package competitors
 
 import (
 	"conflict-graph-benchmarks/internal/concurrency"

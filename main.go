@@ -7,7 +7,8 @@ import (
 	"os"
 	"strings"
 
-	"conflict-graph-benchmarks/internal/algorithms"
+	"conflict-graph-benchmarks/internal/algorithms/competitors"
+	"conflict-graph-benchmarks/internal/algorithms/islands"
 	"conflict-graph-benchmarks/internal/digestion"
 	"conflict-graph-benchmarks/internal/model"
 )
@@ -46,20 +47,27 @@ type algorithm struct {
 // timed: it is the parity reference every algorithm is checked against.
 func newAlgorithms() []algorithm {
 	bitmap, bitmapIndex := model.NewConflictGraph(), model.NewInvertedIndex()
-	idBucket, bucket := model.NewConflictGraph(), model.NewIdBucket()
 
 	return []algorithm{
 		{"Bitmap", func(b *model.Block) (int, int, float64) {
-			algorithms.BitmapConstruction(b, bitmap, bitmapIndex)
+			competitors.BitmapConstruction(b, bitmap, bitmapIndex)
 			return 0, 0, 0
 		}, bitmap, nil, nil},
-		{"IDBucket", func(b *model.Block) (int, int, float64) {
-			algorithms.IDBucketConstruction(b, idBucket, bucket)
-			return 0, 0, 0
-		}, idBucket, nil, nil},
-		islandAlgorithm("IslandLean", algorithms.NewIslandLean(algorithms.DefaultIslandConfig)),
-		islandAlgorithm("IslandLeanHub", algorithms.NewIslandLeanHub(algorithms.DefaultIslandConfig, algorithms.DefaultHubRule())),
+		matrixAlgorithm("SortJoin", competitors.NewSortJoin(competitors.DefaultSortJoinConfig).Run),
+		matrixAlgorithm("HybridJoin", competitors.NewHybridJoin(competitors.DefaultHybridJoinConfig).Run),
+		islandAlgorithm("IslandLean", islands.NewIslandLean(islands.DefaultIslandConfig)),
+		islandAlgorithm("IslandLeanHub", islands.NewIslandLeanHub(islands.DefaultIslandConfig, islands.DefaultHubRule())),
 	}
+}
+
+// matrixAlgorithm wraps an algorithm that writes the full conflict matrix
+// into a graph of its own.
+func matrixAlgorithm(name string, run func(*model.Block, *model.ConflictGraph)) algorithm {
+	graph := model.NewConflictGraph()
+	return algorithm{name, func(b *model.Block) (int, int, float64) {
+		run(b, graph)
+		return 0, 0, 0
+	}, graph, nil, nil}
 }
 
 // islandVariant is an island algorithm: its output is a model.IslandTopology.
@@ -91,13 +99,15 @@ func islandAlgorithm(name string, v islandVariant) algorithm {
 }
 
 // suites maps a -suite name to its registry and default results file. "uf" is
-// the proving ground: island variants against each other.
+// the proving ground: island variants against each other; "cmp" sweeps the
+// competitors' knobs.
 var suites = map[string]struct {
 	registry func() []algorithm
 	results  string
 }{
 	"main": {newAlgorithms, "benchmark_results.json"},
 	"uf":   {newUFArena, "benchmark_results_uf.json"},
+	"cmp":  {newCompetitorArena, "benchmark_results_cmp.json"},
 }
 
 // selectAlgorithms returns the algorithms of the registry named in the
@@ -125,7 +135,7 @@ func selectAlgorithms(all []algorithm, list string) ([]algorithm, error) {
 
 func main() {
 	algList := flag.String("algs", "", "comma-separated algorithms to time (default: all of the suite)")
-	suiteName := flag.String("suite", "main", "algorithm registry: main (all algorithms) or uf (island variants only)")
+	suiteName := flag.String("suite", "main", "algorithm registry: main (all algorithms), uf (island variants) or cmp (competitor knobs)")
 	outPath := flag.String("out", "", "results file (default: the suite's)")
 	traceList := flag.String("traces", "", "comma-separated traces to run (default: all)")
 	blockCap := flag.Int("blocks", 0, "at most this many blocks per trace (default: the trace's own limit)")
@@ -140,10 +150,16 @@ func main() {
 	if *outPath == "" {
 		*outPath = suite.results
 	}
-	algs, err := selectAlgorithms(suite.registry(), *algList)
-	if err != nil {
-		log.Fatalf("selecting algorithms: %v", err)
+	// Every algorithm is instantiated scratchCopies times, so each timing
+	// round runs on scratch memory placed elsewhere (see timeAlgorithm).
+	copies := make([][]algorithm, scratchCopies)
+	for c := range copies {
+		var err error
+		if copies[c], err = selectAlgorithms(suite.registry(), *algList); err != nil {
+			log.Fatalf("selecting algorithms: %v", err)
+		}
 	}
+	algs := copies[0]
 	names := make([]string, len(algs))
 	for i, alg := range algs {
 		names[i] = alg.name
@@ -178,7 +194,7 @@ func main() {
 		if *blockCap > 0 {
 			maxBlocks = min(maxBlocks, *blockCap)
 		}
-		processFile(trace.path, trace.name, manager, &allMetrics, maxBlocks, algs)
+		processFile(trace.path, trace.name, manager, &allMetrics, maxBlocks, copies)
 	}
 
 	// Phase 4: Analysis Export

@@ -1,4 +1,5 @@
-"""Short hyperparameter tuning pass for the row algorithms (Bitmap, IDBucket).
+"""Short hyperparameter tuning pass for the row algorithm Bitmap (IDBucket was
+archived 2026-10-11).
 
 One command, resumable, re-runnable on other hardware:
     python tune_hyperparams.py            run / resume, then write the winners into the sources
@@ -11,7 +12,7 @@ knobs are a run-time config, so the proving ground times their settings side
 by side in one run (`go run . -suite=uf`, registry in ufarena.go).
 
 Each run rewrites the knob literals in the Go sources, runs
-`go run . -algs=Bitmap,IDBucket` (all six traces, parity-verified against
+`go run . -algs=Bitmap` (all six traces, parity-verified against
 NaiveSequential) and stores every per-block time plus the run's [Platform]
 line in tuning_results.json.
 
@@ -51,7 +52,7 @@ from datetime import datetime
 REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 RESULTS_FILE = os.path.join(REPO_DIR, "tuning_results.json")
 BENCH_FILE = os.path.join(REPO_DIR, "benchmark_results.json")
-ALG_DIR = os.path.join(REPO_DIR, "internal", "algorithms")
+ALG_DIR = os.path.join(REPO_DIR, "internal", "algorithms", "competitors")
 
 TRACES = ["Ethereum", "EthereumNoHub", "Solana", "Sui", "YCSB", "TPC"]
 MAX_THRESHOLD = 3000  # = model.MaximumGraphSize: "always sequential"
@@ -60,7 +61,6 @@ MAX_THRESHOLD = 3000  # = model.MaximumGraphSize: "always sequential"
 KNOBS = {}
 for _file, _names in {
     "bitmap.go": ["BitmapSequentialMax", "BitmapChunkRows"],
-    "id_bucket_construction.go": ["IDBucketSequentialMax", "IDBucketChunkRows"],
 }.items():
     for _name in _names:
         KNOBS[_name] = (os.path.join(ALG_DIR, _file),
@@ -69,7 +69,6 @@ for _file, _names in {
 # Benchmark names and their knobs.
 ALGS = {
     "Bitmap": {"seq": "BitmapSequentialMax", "chunk": "BitmapChunkRows"},
-    "IDBucket": {"seq": "IDBucketSequentialMax", "chunk": "IDBucketChunkRows"},
 }
 
 CHUNKS = [16, 64, 256]

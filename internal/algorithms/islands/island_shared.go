@@ -1,4 +1,9 @@
-package algorithms
+// Package islands holds the Union-Find family: IslandLean and IslandLeanHub
+// partition the block into islands that cannot conflict with each other,
+// build each island's graph separately, and output a model.IslandTopology
+// (independent island graphs plus, for IslandLeanHub, a hub layer) instead of
+// one global matrix. Experimental hub rules live in uflab.
+package islands
 
 import (
 	"runtime"
@@ -20,6 +25,14 @@ type IslandConfig struct {
 	ParallelWords int    // larger blocks run on the pool once their matrices hold this many words
 	SplitRows     uint32 // rows per parallel sweep unit of islands wider than 64
 	GroupTxns     int    // parallel path: small islands are claimed in groups of about this many members
+	// JoinDense > 0 builds islands wider than 64 object-major (wideJoin,
+	// HybridJoin's kernel) instead of index build + row sweep + wipe; an
+	// object is ORed as rows when its pair bits exceed JoinDense × its
+	// accessors × row words. 0 keeps the Bitmap-style wide kernel.
+	JoinDense float64
+	// JoinMinWidth: with JoinDense > 0, only islands with rows of at least
+	// this many words use the object-major kernel.
+	JoinMinWidth uint32
 }
 
 // DefaultIslandConfig holds the knobs the Phase 4 proving ground picked.
@@ -134,6 +147,11 @@ type islandCore struct {
 	built       []atomic.Bool        // per wide island: index rows complete
 	extraUnits  []islandUnit         // the algorithm's own independent units (IslandLeanHub: hub rows)
 	extraRun    func(lo, hi uint32)
+
+	// Object-major wide kernel (JoinDense > 0).
+	joinSpans  []joinSpan // per object, all-zero between islands
+	join       wideJoin
+	workerJoin []wideJoin
 }
 
 // Topology returns the output of the last Run.
@@ -179,6 +197,9 @@ func (c *islandCore) parallel(block *model.Block, words int) bool {
 // build builds the collected islands, inline or on the worker pool.
 func (c *islandCore) build(block *model.Block, parallel bool) {
 	c.index.Prepare(block.NumUniqueObjects, c.stride)
+	if c.cfg.JoinDense > 0 {
+		c.joinSpans = model.Resize(c.joinSpans, int(block.NumUniqueObjects))
+	}
 	if parallel {
 		c.buildParallel(block.Transactions)
 	} else {
@@ -199,6 +220,9 @@ func (c *islandCore) buildSequential(txns []model.Transaction) {
 		case k <= 64:
 			compactLive(&c.live, txns, island, c.anchor)
 			narrowIsland(&c.live, local, &c.index, 1)
+		case c.joinsWide(c.out.LocalWidths[i]):
+			compactLive(&c.live, txns, island, c.anchor)
+			c.join.build(&c.live, k, local, c.out.LocalWidths[i], c.joinSpans, c.cfg.JoinDense)
 		default:
 			width := c.out.LocalWidths[i]
 			compactLive(&c.live, txns, island, c.anchor)
@@ -245,6 +269,10 @@ func (c *islandCore) buildParallel(txns []model.Transaction) {
 			case unitBuild:
 				island := islands[order[u.a]]
 				compactLive(&c.wideLive[u.a], txns, island, c.anchor)
+				if i := order[u.a]; c.joinsWide(widths[i]) {
+					c.workerJoin[worker].build(&c.wideLive[u.a], uint32(len(island)), graphs[i], widths[i], c.joinSpans, c.cfg.JoinDense)
+					continue
+				}
 				buildWide(&c.wideLive[u.a], 0, uint32(len(island)), &c.index, stride)
 				c.built[u.a].Store(true)
 			case unitSmall:
@@ -262,7 +290,9 @@ func (c *islandCore) buildParallel(txns []model.Transaction) {
 	})
 
 	for j := range numWide {
-		wipeWide(&c.wideLive[j], 0, uint32(len(islands[order[j]])), &c.index, stride)
+		if i := order[j]; !c.joinsWide(widths[i]) {
+			wipeWide(&c.wideLive[j], 0, uint32(len(islands[i])), &c.index, stride)
+		}
 	}
 }
 
@@ -271,6 +301,7 @@ func (c *islandCore) prepareWorkers() {
 	if workers := runtime.GOMAXPROCS(0); len(c.workerIndex) < workers {
 		c.workerIndex = make([]model.IslandIndex, workers)
 		c.workerLive = make([]model.LiveAccesses, workers)
+		c.workerJoin = make([]wideJoin, workers)
 	}
 	for w := range c.workerIndex {
 		c.workerIndex[w].Prepare(uint32(len(c.anchor)), 1)
@@ -322,11 +353,20 @@ func (c *islandCore) planUnits(numWide int) {
 		lo = hi
 	}
 	for j := range numWide {
+		if c.joinsWide(c.out.LocalWidths[c.order[j]]) {
+			continue // the object-major kernel builds the whole island in its build unit
+		}
 		k := uint32(len(islands[c.order[j]]))
 		for lo := uint32(0); lo < k; lo += c.cfg.SplitRows {
 			c.units = append(c.units, islandUnit{kind: unitSweep, a: uint32(j), lo: lo, hi: min(lo+c.cfg.SplitRows, k)})
 		}
 	}
+}
+
+// joinsWide reports whether an island wider than 64 with rows of width words
+// is built by the object-major kernel.
+func (c *islandCore) joinsWide(width uint32) bool {
+	return c.cfg.JoinDense > 0 && width >= c.cfg.JoinMinWidth
 }
 
 // buildSmall builds an island of at most 64 members end to end on the
@@ -475,4 +515,133 @@ func wipeWide(la *model.LiveAccesses, lo, hi uint32, idx *model.IslandIndex, str
 			idx.Readers[obj*stride+word] = 0
 		}
 	}
+}
+
+// joinSpan is one object's place in a wideJoin: first its writer and reader
+// counts, then lo = arena start + 1 (0 = not laid out yet), with w and r
+// reused as the fill cursors.
+type joinSpan struct {
+	w, r, lo uint32
+}
+
+// wideJoin is the object-major kernel for islands wider than 64 members
+// (IslandConfig.JoinDense > 0), HybridJoin's kernel in local coordinates:
+// the island's live accesses are grouped by object (a counting sort), then
+// each object emits its writer × writer and writer × reader pairs as bits, or,
+// when it has many pairs, ORs its writer and accessor rows into its accessors'
+// rows. It replaces the index build, row sweep and wipe of the Bitmap-style
+// wide kernel. Every accessor of a live object is in the object's island, so
+// the per-object spans of concurrently built islands never overlap.
+type wideJoin struct {
+	objs       []uint32 // the island's live objects, in first-write order
+	arena      []uint32 // per object: writers, then readers (local positions)
+	wRow, aRow []uint64 // scratch rows of a dense object, all-zero between uses
+}
+
+// build writes the local matrix of an island of k members (width words per
+// row) from its compacted live accesses. spans is indexed by object and is
+// all-zero on entry and on return.
+func (j *wideJoin) build(la *model.LiveAccesses, k uint32, local []uint64, width uint32, spans []joinSpan, denseFactor float64) {
+	j.group(la, k, spans)
+	clear(local)
+	j.wRow, j.aRow = model.Resize(j.wRow, int(width)), model.Resize(j.aRow, int(width))
+	rowCost := denseFactor * float64(width)
+	for _, obj := range j.objs {
+		s := &spans[obj]
+		lo := s.lo - 1
+		writers := j.arena[lo:s.w]
+		readers := j.arena[s.w:s.r]
+		*s = joinSpan{}
+		nw, nr := len(writers), len(readers)
+		if pairBits := nw*(nw-1) + 2*nw*nr; float64(pairBits) <= rowCost*float64(nw+nr) {
+			emitLocalPairs(local, width, writers, readers)
+			continue
+		}
+		j.orDense(local, width, writers, readers)
+	}
+}
+
+// group counting-sorts the island's live accesses by object into the arena:
+// count, lay out in first-write order, fill. Every live read is of an object
+// a member writes, so the writes list every object.
+func (j *wideJoin) group(la *model.LiveAccesses, k uint32, spans []joinSpan) {
+	for p := range k {
+		for _, obj := range la.Writes(p) {
+			spans[obj].w++
+		}
+		for _, obj := range la.Reads(p) {
+			spans[obj].r++
+		}
+	}
+	j.objs = j.objs[:0]
+	pos := uint32(0)
+	for _, obj := range la.W[:la.WEnd[k-1]] {
+		s := &spans[obj]
+		if s.lo != 0 {
+			continue
+		}
+		j.objs = append(j.objs, obj)
+		writers, readers := s.w, s.r
+		// The counts become the fill cursors: the writers' ends at the
+		// readers' start, the readers' at the object's end.
+		s.lo, s.w, s.r = pos+1, pos, pos+writers
+		pos += writers + readers
+	}
+	j.arena = model.Resize(j.arena, int(pos))
+	for p := range k {
+		for _, obj := range la.Writes(p) {
+			s := &spans[obj]
+			j.arena[s.w] = p
+			s.w++
+		}
+		for _, obj := range la.Reads(p) {
+			s := &spans[obj]
+			j.arena[s.r] = p
+			s.r++
+		}
+	}
+}
+
+// emitLocalPairs sets both bits of every writer × writer and writer × reader
+// pair of one object in a local matrix.
+func emitLocalPairs(local []uint64, width uint32, writers, readers []uint32) {
+	for a, w := range writers {
+		row := local[w*width : (w+1)*width]
+		for _, p := range writers[a+1:] {
+			row[p/64] |= 1 << (p % 64)
+			local[p*width+w/64] |= 1 << (w % 64)
+		}
+		for _, p := range readers {
+			row[p/64] |= 1 << (p % 64)
+			local[p*width+w/64] |= 1 << (w % 64)
+		}
+	}
+}
+
+// orDense ORs one hot object's rows into its accessors' rows: a writer gets
+// every accessor but itself, a reader every writer.
+func (j *wideJoin) orDense(local []uint64, width uint32, writers, readers []uint32) {
+	wRow, aRow := j.wRow, j.aRow
+	for _, p := range writers {
+		wRow[p/64] |= 1 << (p % 64)
+	}
+	copy(aRow, wRow)
+	for _, p := range readers {
+		aRow[p/64] |= 1 << (p % 64)
+	}
+	for _, w := range writers {
+		row := local[w*width : (w+1)*width]
+		for i := range row {
+			row[i] |= aRow[i]
+		}
+		row[w/64] &^= 1 << (w % 64)
+	}
+	for _, r := range readers {
+		row := local[r*width : (r+1)*width]
+		for i := range row {
+			row[i] |= wRow[i]
+		}
+	}
+	clear(wRow)
+	clear(aRow)
 }

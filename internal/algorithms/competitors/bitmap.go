@@ -1,4 +1,4 @@
-package algorithms
+package competitors
 
 import (
 	"conflict-graph-benchmarks/internal/concurrency"

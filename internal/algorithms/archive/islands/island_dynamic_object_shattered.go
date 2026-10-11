@@ -1,6 +1,6 @@
 //go:build ignore
 
-package algorithms
+package islands
 
 import (
 	"math/bits"
