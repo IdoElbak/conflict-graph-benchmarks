@@ -1,6 +1,79 @@
+> **Historical record** of the project changelog (was PROJECT_STATE.md), moved here on 2026-10-14. File names and paths are as they were then: `island_hubs.go` is now part of `island_shared.go`, `island_hub.go` and `island_bipartite.go`; `bitmap.go`, `hybrid_join.go` and `object_lists.go` are now `bitmap_tiny.go` and `hybrid_join_tiny.go`; the result files named here were deleted unless listed in `7_final_build/`.
+
 # Project State — Conflict Graph Construction Benchmarks
 
-*Snapshot: 2026-10-11 (Phase 3: competitor algorithms, field cut to three, placement fix; §0 has the changelog). Companion files: `ALGORITHMS.md` (pseudo-code, knobs), `ANOMALIES.md` (measurement investigation), `PHASE4_DIRECTIONS.md` (Phase 4 plan), `PHASE4_RESULTS.md` (Phase 4 results), `PHASE3_RESULTS.md` (Phase 3 results).*
+*Snapshot: 2026-10-13 (UF round 3 done: the UF family optimized, the top two promoted as IslandHub and IslandBipartite, the main suite cut to four algorithms; §0 has the changelog). Companion files: `ALGORITHMS.md` (pseudo-code, knobs), `ANOMALIES.md` (measurement investigation), `PHASE4_DIRECTIONS.md` (Phase 4 plan), `PHASE4_RESULTS.md` (Phase 4 results), `PHASE3_RESULTS.md` (Phase 3 results), `UF_NEXT_RESULTS.md` (UF next round), `UF_ROUND3_RESULTS.md` (UF round 3).*
+
+## Next steps (agreed 2026-10-13)
+
+1. **Final UF tuning (in progress):** 2–3 hours over every UF-family knob, mainly the hub and
+   density heuristics (prefix length, hub threshold, hub-writer share, dense minimum size), with
+   per-algorithm defaults and, where it pays, knobs that depend on block size. Before it: more
+   YCSB/TPC blocks of 500–1000 transactions, and any last algorithm ideas. After it the UF
+   algorithms are final.
+2. **Tidy the folder.** No algorithm changes after this point.
+3. The user commits and reviews the code.
+4. **Presentation 1:** the changes of the last month, for the professor.
+5. **Presentation 2:** the whole project, for an audience new to the field.
+6. **Before the final presentation:** the full 1000-block Solana trace (only after the tuning; it
+   is slow), then Phase 5 on the many-core server.
+
+## 0. Changelog 2026-10-13 (UF round 3) — details in `UF_ROUND3_RESULTS.md`
+
+- **UF family optimized** (3-layout rounds, vs HybridJoinTiny):
+  - kept: the giant-island object-major kernel (`IslandConfig.GiantShare` 0.3), the dense fallback
+    only from 512 transactions, and hub rule 64/3 for the matrix variant;
+  - rejected with evidence: a branch-free batched partition (×0.85–0.90), deciding "dense" before
+    clearing the anchors (neutral), the prefix-giant detector (misses dense YCSB) and three other
+    prefix statistics (none separates dense TPC from Ethereum), and no fallback at all (a trade).
+- **Promoted** to `islands/` as **IslandHub** (matrix hub layer, contract unchanged) and
+  **IslandBipartite** (bipartite hub layer): `island_shared.go` (core), `island_hubs.go` (shared
+  algorithm), `island_hub.go`, `island_bipartite.go`. Identical knobs; only the hub layer differs.
+- **Archived** (build-ignored, `internal/algorithms/archive/`): IslandLean, IslandLeanHub, the
+  Phase 4 core (`island_lean_shared.go`), `uflab/`, `ufnext/` (every experiment and probe of both
+  UF rounds), and SortJoin (its `emitPairs` moved to `hybrid_join.go`).
+- **Main suite = four algorithms**: BitmapTiny, HybridJoinTiny, IslandHub, IslandBipartite.
+  - Competitor ranking: HybridJoinTiny > HybridJoin ×0.93 > BitmapTiny ×0.85 > Bitmap > SortJoin.
+  - HybridJoin is HybridJoinTiny without the one-word kernel, so the second competitor is
+    BitmapTiny.
+  - Bitmap and HybridJoin stay as kernels and are no longer registered on their own.
+  - `ufarena.go` sweeps the two island algorithms' knobs; `cmparena.go` sweeps HybridJoinTiny's;
+    `parity_test.go` forces every island path (mutation-checked).
+- **Definitive run** (`benchmark_results.json` plus two layout builds, `benchmark_results_final_L31/L32.json`; the previous suite's run is kept as `benchmark_results_2026-10-11_old_suite.json`), geo vs HybridJoinTiny:
+
+  | Algorithm | geo |
+  |---|---|
+  | IslandBipartite | ×1.21 |
+  | IslandHub | ×1.17 |
+  | BitmapTiny | ×0.85 |
+
+  Figures in `optimization_log/6_uf_round3/`. `show_results.py` now defaults to the baseline HybridJoinTiny.
+
+## 0. Changelog 2026-10-11 (UF next round, after the Phase 3 commit) — details in `UF_NEXT_RESULTS.md`
+
+- **New package `internal/algorithms/islands/ufnext/`** (proving ground only; IslandLean and IslandLeanHub are untouched):
+  - `Next` (`next_core.go`, `next_hub.go`): IslandLeanHub forked, with every idea as a knob. Tiny path, dense fallback by the prefix's hub writers, bipartite hub layer, fused prefix, read-counting prefix, concurrent CAS partition (`next_cas.go`).
+  - `Adaptive` (`adaptive.go`, sampled-density fallback); shared whole-block paths (`whole_block.go`).
+  - Probes as tests (`UFNEXT_STATS=1`): trace statistics, the RCM span ceiling, vertex cuts, prefix hub statistics. Trace-driven `go test -bench` for pprof profiles only (not P-core pinned).
+- **New competitor kernel `competitors/tiny_bitmap.go`**: TinyBitmap, one-word Bitmap without the filter, ×1.8 vs Bitmap on Sui. Fairness counterparts BitmapTiny and HybridJoinTiny are in `-suite=cmp` and the uf arena. Not in the main suite (decision pending).
+- **`uflab/space_saving.go`**: report B's Space-Saving hub rule (loses).
+- **Model, additive only**:
+  - `ConflictGraph.Matrix`;
+  - `IslandTopology.SetWholeBlock`, plus `HubWriters`/`HubReaders` for the bipartite hub layer (`Reconstruct` expands them);
+  - `IslandForest.Size`.
+- **Parity test**: every ufnext path forced, mutation-checked; plus an empty block (it caught a crash on Sui's empty blocks).
+- **Arena**: Bitmap, HybridJoin and their tiny counterparts are bars in `-suite=uf` (`newUFNextArena` in `ufarena.go`).
+- **Measurement finding: code layout swings results ±10% on the P-cores.** An unused function added elsewhere moved a variant from ×0.89 to ×1.02. New protocol: 3 layout-perturbed builds plus `layout_league.py` (geo over layouts; spread ±0.01).
+- **Result** (3 layouts, vs HybridJoin):
+
+  | Variant | geo | vs HybridJoinTiny |
+  |---|---|---|
+  | NextM (contract unchanged) | ×1.24 | ×1.13 |
+  | NextB (bipartite hub output) | ×1.31 | ×1.18 |
+  | Hub (IslandLeanHub) | ×1.07 | ×0.96 |
+
+  Rejected with evidence: CAS partition on 6 cores, Space-Saving, the Afforest writer-pass check, RCM (probe ceiling ≤ 5%), vertex cuts (probe), read-counting hubs. Fused prefix: within noise.
+- `optimization_log/5_uf_next/` (era 5).
 
 ## 0. Changelog 2026-10-11 (Phase 3 decisions applied)
 
@@ -78,6 +151,8 @@ Tooling: `show_results.py` (text tables; `--league --baseline X` for the proving
 Measurement caveat (2026-09-28): whole-run scores of unchanged code drift up to ×1.11 between runs on the laptop (more for parallel code), so compare algorithms within one run, and compare parallel against sequential paired within one process.
 
 ## 4. Current results (2026-10-02, after the Phase 4 cleanup; full traces, one run, on AC)
+
+**Superseded:** the current numbers are in §0 (2026-10-13) and `UF_ROUND3_RESULTS.md` §1. This section is kept as the Phase 4 record.
 
 Median per-block speed-up vs **Bitmap** (which includes the Phase 4 access filters), win rate in
 parentheses; synthetic traces split by realized density; geo = geometric mean over the 10 columns:

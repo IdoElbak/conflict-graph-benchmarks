@@ -1,3 +1,5 @@
+//go:build ignore
+
 package islands
 
 import "conflict-graph-benchmarks/internal/model"

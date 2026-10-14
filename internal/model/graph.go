@@ -43,6 +43,14 @@ func (conflictGraph *ConflictGraph) Row(txnIdx uint32) []uint64 {
 	return conflictGraph.graph[start:end:end]
 }
 
+// Matrix returns the rows of an n-transaction block as one slice, row t at
+// t*width, and the row width: for algorithms that hand the matrix on as a
+// whole (an island holding the whole block).
+func (conflictGraph *ConflictGraph) Matrix(n uint32) ([]uint64, uint32) {
+	end := n * conflictGraph.width
+	return conflictGraph.graph[:end:end], conflictGraph.width
+}
+
 // AddEdge sets the bit of peerIdx in the row of txnIdx
 func (conflictGraph *ConflictGraph) AddEdge(txnIdx, peerIdx uint32) {
 	wordIdx := txnIdx*conflictGraph.width + peerIdx/SizeOfUint64

@@ -1,23 +1,24 @@
-// Package islands holds the Union-Find family: IslandLean and IslandLeanHub
-// partition the block into islands that cannot conflict with each other,
-// build each island's graph separately, and output a model.IslandTopology
-// (independent island graphs plus, for IslandLeanHub, a hub layer) instead of
-// one global matrix. Experimental hub rules live in uflab.
+// Package islands holds the Union-Find family. Both algorithms partition the
+// block into islands that cannot conflict with each other, keeping hub objects
+// (written by many of the block's first transactions) out of the partition,
+// build each island's graph separately, and output a model.IslandTopology:
+// independent island graphs plus a hub layer, instead of one global matrix.
+// IslandHub keeps the hub layer as a bit-matrix over the hub touchers;
+// IslandBipartite outputs it as per-hub writer and reader lists. Retired
+// variants are in ../archive/islands.
 package islands
 
 import (
+	"math"
 	"runtime"
 	"sync/atomic"
 
+	"conflict-graph-benchmarks/internal/algorithms/competitors"
 	"conflict-graph-benchmarks/internal/concurrency"
 	"conflict-graph-benchmarks/internal/model"
 )
 
-// ---------------------------------------------------------------------------
-// Knobs shared by the island algorithms (IslandLean, IslandLeanHub).
-// ---------------------------------------------------------------------------
-
-// IslandConfig holds the knobs of the island algorithms. The proving ground
+// IslandConfig holds the knobs of the island core. The proving ground
 // (`go run . -suite=uf`) times several configurations in one run.
 type IslandConfig struct {
 	PairwiseMax   int    // islands of 3..PairwiseMax (<= 64) members use pairwise HasConflict
@@ -25,28 +26,28 @@ type IslandConfig struct {
 	ParallelWords int    // larger blocks run on the pool once their matrices hold this many words
 	SplitRows     uint32 // rows per parallel sweep unit of islands wider than 64
 	GroupTxns     int    // parallel path: small islands are claimed in groups of about this many members
-	// JoinDense > 0 builds islands wider than 64 object-major (wideJoin,
-	// HybridJoin's kernel) instead of index build + row sweep + wipe; an
-	// object is ORed as rows when its pair bits exceed JoinDense × its
-	// accessors × row words. 0 keeps the Bitmap-style wide kernel.
+	// GiantShare > 0 builds every island holding at least this share of the
+	// block's transactions (and more than 64) object-major (wideJoin,
+	// HybridJoin's kernel in local coordinates) instead of by index build,
+	// row sweep and wipe: on an island of most of the block, the Bitmap-style
+	// sweep costs what Bitmap costs, where the per-object choice between pair
+	// bits and row ORs wins.
+	GiantShare float64
+	// JoinDense: in the object-major kernel, an object is ORed as rows when
+	// its pair bits exceed JoinDense × its accessors × row words.
 	JoinDense float64
-	// JoinMinWidth: with JoinDense > 0, only islands with rows of at least
-	// this many words use the object-major kernel.
-	JoinMinWidth uint32
 }
 
-// DefaultIslandConfig holds the knobs the Phase 4 proving ground picked.
+// DefaultIslandConfig holds the knobs the proving ground picked.
 var DefaultIslandConfig = IslandConfig{
 	PairwiseMax:   4,
 	SequentialMax: 300,
 	ParallelWords: 8000,
 	SplitRows:     16,
 	GroupTxns:     256,
+	GiantShare:    0.3,
+	JoinDense:     1,
 }
-
-// ---------------------------------------------------------------------------
-// Per-object anchors: the partition's state, and what makes an object live.
-// ---------------------------------------------------------------------------
 
 // Per-object anchor encoding:
 //
@@ -82,51 +83,9 @@ func join(f *model.IslandForest, root, a uint32) uint32 {
 	return root
 }
 
-// partitionByAnchors unions every transaction with the first writer of each
-// object it writes, then of each object it reads, in two passes over the
-// accesses, and marks every object a second transaction touches as shared.
-// Reads of never-written objects union nothing. anchor must be all-zero on
-// entry. Each transaction's root is tracked across its own accesses, so a
-// union costs one Find, not two.
-func partitionByAnchors(block *model.Block, f *model.IslandForest, anchor []uint32) {
-	txns := block.Transactions
-	for t := range txns {
-		// Nobody has joined t yet: anchors only ever name earlier sets.
-		root := uint32(t)
-		for _, obj := range txns[t].WriteSet {
-			a := anchor[obj]
-			if a == 0 {
-				anchor[obj] = root + 1
-				continue
-			}
-			anchor[obj] = a | sharedBit
-			root = join(f, root, a)
-		}
-	}
-	for t := range txns {
-		root := noRoot // looked up on the first live read only
-		for _, obj := range txns[t].ReadSet {
-			a := anchor[obj]
-			if a == 0 {
-				continue
-			}
-			anchor[obj] = a | sharedBit
-			if root == noRoot {
-				root = f.Find(uint32(t))
-			}
-			root = join(f, root, a)
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
-// The island half of both algorithms: islands, dispatch, parallel path.
-// ---------------------------------------------------------------------------
-
-// islandCore holds what IslandLean and IslandLeanHub share: the output, the
-// per-object anchors, the union-find forest and the per-island construction
-// of the local matrices. All scratch is reused; steady-state calls allocate
-// nothing.
+// islandCore holds the output, the per-object anchors, the union-find forest
+// and the per-island construction of the local matrices. All scratch is reused;
+// steady-state calls allocate nothing.
 type islandCore struct {
 	cfg    IslandConfig
 	out    model.IslandTopology
@@ -145,11 +104,12 @@ type islandCore struct {
 	order       []uint32             // wide islands, then small islands
 	units       []islandUnit         // claims of the single pool pass
 	built       []atomic.Bool        // per wide island: index rows complete
-	extraUnits  []islandUnit         // the algorithm's own independent units (IslandLeanHub: hub rows)
+	extraUnits  []islandUnit         // the algorithm's own independent units (matrix hub layer: hub rows)
 	extraRun    func(lo, hi uint32)
 
-	// Object-major wide kernel (JoinDense > 0).
-	joinSpans  []joinSpan // per object, all-zero between islands
+	// Object-major kernel for giant islands (GiantShare > 0).
+	giantMin   uint32 // GiantShare of the current block's transactions, at least 65
+	joinSpans  []joinSpan
 	join       wideJoin
 	workerJoin []wideJoin
 }
@@ -159,26 +119,24 @@ func (c *islandCore) Topology() *model.IslandTopology {
 	return &c.out
 }
 
-// begin resets the output, the anchors and the forest for a new block.
+// begin resets the output and the anchors for a new block.
 func (c *islandCore) begin(block *model.Block) {
 	c.out.Reset()
 	c.anchor = model.Resize(c.anchor, int(block.NumUniqueObjects))
 	clear(c.anchor)
-	c.forest.Reset(uint32(len(block.Transactions)))
-}
-
-// buildIslands reads the islands off the partitioned forest and builds their
-// local matrices; it returns (islands, largest, mean size).
-func (c *islandCore) buildIslands(block *model.Block) (int, int, float64) {
-	count, largest, mean := c.collect(block)
-	c.build(block, c.parallel(block, c.localWords))
-	return count, largest, mean
+	c.extraUnits = c.extraUnits[:0]
 }
 
 // collect reads the islands off the partitioned forest and carves their local
 // matrices; it returns (islands, largest, mean size).
 func (c *islandCore) collect(block *model.Block) (int, int, float64) {
 	inIslands, largest := c.out.GroupIslands(&c.forest, uint32(len(block.Transactions)))
+	return c.carve(inIslands, largest)
+}
+
+// carve carves the local matrices of the grouped islands; it returns
+// (islands, largest, mean size).
+func (c *islandCore) carve(inIslands, largest int) (int, int, float64) {
 	c.localWords = c.out.CarveLocalGraphs()
 	c.stride = max(1, model.WordsPerRow(uint32(largest)))
 	if len(c.out.Islands) == 0 {
@@ -188,8 +146,7 @@ func (c *islandCore) collect(block *model.Block) (int, int, float64) {
 }
 
 // parallel reports whether the block takes the parallel path: more than
-// SequentialMax transactions and matrices of at least ParallelWords words to
-// build (their size tracks the sweep work, which is what parallelizes).
+// SequentialMax transactions and at least ParallelWords words to build.
 func (c *islandCore) parallel(block *model.Block, words int) bool {
 	return uint32(len(block.Transactions)) > c.cfg.SequentialMax && words >= c.cfg.ParallelWords
 }
@@ -197,7 +154,9 @@ func (c *islandCore) parallel(block *model.Block, words int) bool {
 // build builds the collected islands, inline or on the worker pool.
 func (c *islandCore) build(block *model.Block, parallel bool) {
 	c.index.Prepare(block.NumUniqueObjects, c.stride)
-	if c.cfg.JoinDense > 0 {
+	c.giantMin = ^uint32(0)
+	if c.cfg.GiantShare > 0 {
+		c.giantMin = max(65, uint32(c.cfg.GiantShare*float64(len(block.Transactions))))
 		c.joinSpans = model.Resize(c.joinSpans, int(block.NumUniqueObjects))
 	}
 	if parallel {
@@ -220,7 +179,7 @@ func (c *islandCore) buildSequential(txns []model.Transaction) {
 		case k <= 64:
 			compactLive(&c.live, txns, island, c.anchor)
 			narrowIsland(&c.live, local, &c.index, 1)
-		case c.joinsWide(c.out.LocalWidths[i]):
+		case k >= c.giantMin:
 			compactLive(&c.live, txns, island, c.anchor)
 			c.join.build(&c.live, k, local, c.out.LocalWidths[i], c.joinSpans, c.cfg.JoinDense)
 		default:
@@ -247,13 +206,11 @@ type islandUnit struct {
 	a, lo, hi uint32
 }
 
-// buildParallel builds the islands in a single pass of the worker pool (each
-// extra pass costs a wake-up of the parked workers). Units are claimed in
-// order: the wide islands' index builds (longest first); the algorithm's own
-// independent units; the small islands, in groups of about GroupTxns members,
-// each built end to end on the worker's own one-word index so no two workers
-// share a cache line of it; last, the wide islands' rows in SplitRows ranges,
-// each waiting for its island's build. The wide rows are wiped afterwards.
+// buildParallel builds the islands in a single pass of the worker pool: wide
+// islands' index builds first, then the algorithm's own units, then the small
+// islands in groups of about GroupTxns members on per-worker one-word
+// indexes, last the wide islands' rows in SplitRows ranges, each waiting for
+// its island's build. The wide rows are wiped afterwards.
 func (c *islandCore) buildParallel(txns []model.Transaction) {
 	c.prepareWorkers()
 	numWide := c.orderIslands()
@@ -269,7 +226,7 @@ func (c *islandCore) buildParallel(txns []model.Transaction) {
 			case unitBuild:
 				island := islands[order[u.a]]
 				compactLive(&c.wideLive[u.a], txns, island, c.anchor)
-				if i := order[u.a]; c.joinsWide(widths[i]) {
+				if i := order[u.a]; uint32(len(island)) >= c.giantMin {
 					c.workerJoin[worker].build(&c.wideLive[u.a], uint32(len(island)), graphs[i], widths[i], c.joinSpans, c.cfg.JoinDense)
 					continue
 				}
@@ -290,8 +247,8 @@ func (c *islandCore) buildParallel(txns []model.Transaction) {
 	})
 
 	for j := range numWide {
-		if i := order[j]; !c.joinsWide(widths[i]) {
-			wipeWide(&c.wideLive[j], 0, uint32(len(islands[i])), &c.index, stride)
+		if k := uint32(len(islands[order[j]])); k < c.giantMin {
+			wipeWide(&c.wideLive[j], 0, k, &c.index, stride)
 		}
 	}
 }
@@ -353,20 +310,14 @@ func (c *islandCore) planUnits(numWide int) {
 		lo = hi
 	}
 	for j := range numWide {
-		if c.joinsWide(c.out.LocalWidths[c.order[j]]) {
+		k := uint32(len(islands[c.order[j]]))
+		if k >= c.giantMin {
 			continue // the object-major kernel builds the whole island in its build unit
 		}
-		k := uint32(len(islands[c.order[j]]))
 		for lo := uint32(0); lo < k; lo += c.cfg.SplitRows {
 			c.units = append(c.units, islandUnit{kind: unitSweep, a: uint32(j), lo: lo, hi: min(lo+c.cfg.SplitRows, k)})
 		}
 	}
-}
-
-// joinsWide reports whether an island wider than 64 with rows of width words
-// is built by the object-major kernel.
-func (c *islandCore) joinsWide(width uint32) bool {
-	return c.cfg.JoinDense > 0 && width >= c.cfg.JoinMinWidth
 }
 
 // buildSmall builds an island of at most 64 members end to end on the
@@ -382,10 +333,6 @@ func (c *islandCore) buildSmall(txns []model.Transaction, island []uint32, local
 		narrowIsland(&c.workerLive[worker], local, &c.workerIndex[worker], 1)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Per-island kernels.
-// ---------------------------------------------------------------------------
 
 // pairEdge writes the matrix of a two-member island: transactions are only
 // ever unioned through a direct W-W or W-R share, so it is one edge.
@@ -407,10 +354,8 @@ func pairwiseIsland(txns []model.Transaction, island []uint32, local []uint64) {
 	}
 }
 
-// compactLive gathers the live accesses of the island's members into la.
-// Every access is stored and the cursor advances by its live bit, so nothing
-// branches on liveness: the build, sweep and wipe that follow run check-free
-// over the accesses that can produce an edge.
+// compactLive gathers the live accesses of the island's members into la,
+// storing every access and advancing the cursor by its live bit.
 func compactLive(la *model.LiveAccesses, txns []model.Transaction, island []uint32, anchor []uint32) {
 	nw, nr := 0, 0
 	for _, t := range island {
@@ -435,8 +380,7 @@ func compactLive(la *model.LiveAccesses, txns []model.Transaction, island []uint
 }
 
 // narrowIsland builds, sweeps and wipes the one-word index rows of an island
-// of at most 64 members (rows at obj*stride), writing its local matrix: a
-// written object contributes its writers and readers, a read one its writers.
+// of at most 64 members (rows at obj*stride), writing its local matrix.
 func narrowIsland(la *model.LiveAccesses, local []uint64, idx *model.IslandIndex, stride uint32) {
 	writers, readers := idx.Writers, idx.Readers
 	k := uint32(len(local))
@@ -517,6 +461,10 @@ func wipeWide(la *model.LiveAccesses, lo, hi uint32, idx *model.IslandIndex, str
 	}
 }
 
+// ---------------------------------------------------------------------------
+// The object-major kernel of giant islands.
+// ---------------------------------------------------------------------------
+
 // joinSpan is one object's place in a wideJoin: first its writer and reader
 // counts, then lo = arena start + 1 (0 = not laid out yet), with w and r
 // reused as the fill cursors.
@@ -525,7 +473,7 @@ type joinSpan struct {
 }
 
 // wideJoin is the object-major kernel for islands wider than 64 members
-// (IslandConfig.JoinDense > 0), HybridJoin's kernel in local coordinates:
+// (IslandConfig.GiantShare > 0), HybridJoin's kernel in local coordinates:
 // the island's live accesses are grouped by object (a counting sort), then
 // each object emits its writer × writer and writer × reader pairs as bits, or,
 // when it has many pairs, ORs its writer and accessor rows into its accessors'
@@ -644,4 +592,301 @@ func (j *wideJoin) orDense(local []uint64, width uint32, writers, readers []uint
 	}
 	clear(wRow)
 	clear(aRow)
+}
+
+// ---------------------------------------------------------------------------
+// The hub algorithm IslandHub and IslandBipartite share: the hub rule, the
+// dense fallback, the tiny path and the partition that keeps the hubs out.
+// Each hub layer lives in its algorithm's file.
+// ---------------------------------------------------------------------------
+
+// HubConfig holds the knobs of IslandHub and IslandBipartite around the island
+// core: the hub rule, and the two block shapes a partition cannot pay for.
+type HubConfig struct {
+	Island IslandConfig
+	// The prefix hub rule: an object is a hub when at least PrefixMinWrites
+	// of the first PrefixTxns transactions write it. Blocks under HubMinTxns
+	// transactions have no hubs: a hub's touchers are few, and the prefix
+	// would be the whole block.
+	PrefixTxns, PrefixMinWrites, HubMinTxns int
+	// PrefixStrided samples the prefix's PrefixTxns transactions evenly
+	// across the block instead of taking the first ones.
+	PrefixStrided bool
+	// TinyMax: blocks of at most this many transactions (<=
+	// competitors.TinyBitmapMax) are built whole by the one-word kernel
+	// competitors.TinyBitmap, where every row is one word and a partition can
+	// only add work; 0 = off.
+	TinyMax int
+	// TinyMinRepeats > 0 keeps nearly conflict-free tiny blocks on the
+	// islands: the one-word kernel runs only when the block's accesses exceed
+	// its distinct objects by at least TinyMinRepeats per transaction. Without
+	// repeated objects a block has few conflicts, and the partition finds
+	// nothing to build, which beats the kernel's passes.
+	TinyMinRepeats float64
+	// DenseHubShare > 0 is the dense-block fallback: in blocks of at least
+	// DenseMinTxns transactions, when at least DenseHubShare of the prefix's
+	// transactions write a hub, one island will hold most of the block, and
+	// HybridJoin builds it whole instead. The prefix rule counts those
+	// transactions while it re-zeroes its counts, so the decision comes before
+	// the partition and costs nothing when it says no.
+	DenseHubShare float64
+	DenseMinTxns  int
+	// HubRowsPerUnit is the number of hub-matrix rows per parallel unit
+	// (matrix hub layer).
+	HubRowsPerUnit int
+}
+
+// hubAccess is one access of a hub object: the toucher index of the
+// transaction (the transaction itself in bipartite mode) and the hub number.
+type hubAccess struct {
+	who, hub uint32
+}
+
+// hubIslands is the algorithm IslandHub and IslandBipartite share: the hub
+// rule, the partition that keeps the hubs out, one of the two hub layers, and
+// the whole-block paths. It is reusable scratch: steady-state calls allocate
+// nothing.
+type hubIslands struct {
+	islandCore
+	hcfg      HubConfig
+	bipartite bool
+	counts    []uint32 // prefix write counts, all-zero between calls
+	hubObjs   []uint32
+	toucherOf []uint32 // per transaction: toucher index + 1, 0 if none yet
+	hubWrites []hubAccess
+	hubReads  []hubAccess
+	sample    []model.Transaction // PrefixStrided: the sampled prefix
+
+	// Matrix hub layer (IslandHub).
+	hubW, hubR   []uint64 // per hub: writer / reader bitset over the touchers
+	hubGraph     []uint64
+	hubStride    uint32
+	complete     bool     // some hub is written by every toucher
+	wOff, rOff   []uint32 // parallel path: toucher q's hubs, grouped by toucher
+	wHubs, rHubs []uint32
+
+	// Bipartite hub layer (IslandBipartite).
+	hubOff, hubArena []uint32
+
+	tinyMinRepeats [competitors.TinyBitmapMax + 1]int // per block size: TinyMinRepeats × n, rounded up
+	whole          wholeBlock
+}
+
+// init readies h with the given knobs and hub layer.
+func (h *hubIslands) init(cfg HubConfig, bipartite bool) {
+	cfg.TinyMax = min(cfg.TinyMax, competitors.TinyBitmapMax)
+	cfg.HubRowsPerUnit = max(1, cfg.HubRowsPerUnit)
+	h.islandCore.cfg, h.hcfg, h.bipartite = cfg.Island, cfg, bipartite
+	if cfg.TinyMax > 0 || cfg.DenseHubShare > 0 {
+		h.whole = newWholeBlock()
+	}
+	for n := range h.tinyMinRepeats {
+		h.tinyMinRepeats[n] = int(math.Ceil(cfg.TinyMinRepeats * float64(n)))
+	}
+	h.extraRun = h.sweepHubRows
+}
+
+// Run builds the block's topology and returns (islands, largest, mean size).
+func (h *hubIslands) Run(block *model.Block) (int, int, float64) {
+	if h.takesTiny(block) {
+		return h.whole.tinyInto(block, &h.out)
+	}
+	h.begin(block)
+	if h.markHubs(block) {
+		return h.whole.joinInto(block, &h.out)
+	}
+	count, largest, mean := h.partitionAndCollect(block)
+	switch {
+	case len(h.hubObjs) == 0:
+		h.build(block, h.parallel(block, h.localWords))
+	case h.bipartite:
+		h.buildBipartite()
+		h.build(block, h.parallel(block, h.localWords))
+	default:
+		touchers := len(h.out.HubTouchers)
+		parallel := h.parallel(block, h.localWords+touchers*int(model.WordsPerRow(uint32(touchers))))
+		if parallel {
+			h.planHubRows()
+		} else {
+			h.buildHubLayer()
+		}
+		h.build(block, parallel)
+	}
+	return count, largest, mean
+}
+
+// takesTiny reports whether the block is built whole by the one-word kernel.
+func (h *hubIslands) takesTiny(block *model.Block) bool {
+	txns := block.Transactions
+	if h.hcfg.TinyMax == 0 || len(txns) > h.hcfg.TinyMax {
+		return false
+	}
+	if h.hcfg.TinyMinRepeats == 0 {
+		return true
+	}
+	repeats := -int(block.NumUniqueObjects)
+	for t := range txns {
+		repeats += len(txns[t].WriteSet) + len(txns[t].ReadSet)
+	}
+	return repeats >= h.tinyMinRepeats[len(txns)]
+}
+
+// partitionAndCollect partitions the block, groups its islands and carves
+// their local matrices; it returns (islands, largest, mean size).
+//
+// Each case has its own loop: on the P-cores, folding them into one loop
+// slowed the plain case by 13% on Ethereum, a code-layout effect (the loops
+// profiled equal in a go test binary, and an unused function added elsewhere
+// moved such gaps by ±10%).
+func (h *hubIslands) partitionAndCollect(block *model.Block) (int, int, float64) {
+	h.forest.Reset(uint32(len(block.Transactions)))
+	switch {
+	case len(h.hubObjs) == 0:
+		partitionPlain(block, &h.forest, h.anchor)
+	case h.bipartite:
+		h.partitionBipartite(block)
+	default:
+		h.partitionHubs(block)
+	}
+	return h.collect(block)
+}
+
+// markHubs applies the prefix rule and marks hub h as anchor hubBase+h. It
+// reports whether the block takes the dense fallback (DenseHubShare).
+func (h *hubIslands) markHubs(block *model.Block) (dense bool) {
+	h.hubObjs = h.hubObjs[:0]
+	n := len(block.Transactions)
+	if n < h.hcfg.HubMinTxns {
+		return false
+	}
+	txns := block.Transactions[:min(n, h.hcfg.PrefixTxns)]
+	if h.hcfg.PrefixStrided && n > len(txns) {
+		h.sample = h.sample[:0]
+		for i := range len(txns) {
+			h.sample = append(h.sample, block.Transactions[i*n/len(txns)])
+		}
+		txns = h.sample
+	}
+	need := uint32(max(2, h.hcfg.PrefixMinWrites))
+	h.counts = model.Resize(h.counts, int(block.NumUniqueObjects))
+	counts := h.counts
+	for t := range txns {
+		for _, obj := range txns[t].WriteSet {
+			if counts[obj]++; counts[obj] == need {
+				h.hubObjs = append(h.hubObjs, obj)
+			}
+		}
+	}
+	for hub, obj := range h.hubObjs {
+		h.anchor[obj] = hubBase + uint32(hub)
+	}
+	if h.hcfg.DenseHubShare > 0 && n >= h.hcfg.DenseMinTxns {
+		writers := rezeroCountingHubWriters(txns, counts, h.anchor)
+		return float64(writers) >= h.hcfg.DenseHubShare*float64(len(txns))
+	}
+	for t := range txns {
+		for _, obj := range txns[t].WriteSet {
+			counts[obj] = 0
+		}
+	}
+	return false
+}
+
+// rezeroCountingHubWriters re-zeroes the counts of the prefix's writes and
+// returns how many of its transactions write a hub (anchor marked).
+func rezeroCountingHubWriters(txns []model.Transaction, counts, anchor []uint32) int {
+	writers := 0
+	for t := range txns {
+		hub := 0
+		for _, obj := range txns[t].WriteSet {
+			if anchor[obj] >= hubBase {
+				hub = 1
+			}
+			counts[obj] = 0
+		}
+		writers += hub
+	}
+	return writers
+}
+
+// partitionPlain is the partition of a block without hubs.
+func partitionPlain(block *model.Block, f *model.IslandForest, anchor []uint32) {
+	txns := block.Transactions
+	for t := range txns {
+		root := uint32(t)
+		for _, obj := range txns[t].WriteSet {
+			a := anchor[obj]
+			if a == 0 {
+				anchor[obj] = root + 1
+				continue
+			}
+			anchor[obj] = a | sharedBit
+			root = join(f, root, a)
+		}
+	}
+	for t := range txns {
+		root := noRoot
+		for _, obj := range txns[t].ReadSet {
+			a := anchor[obj]
+			if a == 0 {
+				continue
+			}
+			anchor[obj] = a | sharedBit
+			if root == noRoot {
+				root = f.Find(uint32(t))
+			}
+			root = join(f, root, a)
+		}
+	}
+}
+
+// wholeBlock builds a block as a single island holding every transaction, for
+// the blocks where a partition cannot pay: tiny blocks with competitors'
+// one-word TinyBitmap, dense ones with HybridJoin. The island is exact but
+// gives the downstream colouring no parallelism inside it; on such blocks the
+// islands would be ~10 transactions or one giant anyway.
+type wholeBlock struct {
+	tiny     competitors.TinyBitmap
+	tinyRows [competitors.TinyBitmapMax]uint64
+	join     *competitors.HybridJoin
+	graph    *model.ConflictGraph
+	identity []uint32
+}
+
+// newWholeBlock returns the scratch of the whole-block paths.
+func newWholeBlock() wholeBlock {
+	w := wholeBlock{
+		join:     competitors.NewHybridJoin(competitors.DefaultHybridJoinConfig),
+		graph:    model.NewConflictGraph(),
+		identity: make([]uint32, model.MaximumGraphSize),
+	}
+	for t := range w.identity {
+		w.identity[t] = uint32(t)
+	}
+	return w
+}
+
+// tinyInto builds a block of at most competitors.TinyBitmapMax transactions
+// into out; it returns (islands, largest, mean size).
+func (w *wholeBlock) tinyInto(block *model.Block, out *model.IslandTopology) (int, int, float64) {
+	n := len(block.Transactions)
+	rows := w.tinyRows[:n]
+	w.tiny.Build(block.Transactions, block.NumUniqueObjects, rows)
+	out.SetWholeBlock(w.identity[:n], rows, 1)
+	return 1, n, float64(n)
+}
+
+// joinInto builds the block with HybridJoin into out; it returns (islands,
+// largest, mean size).
+func (w *wholeBlock) joinInto(block *model.Block, out *model.IslandTopology) (int, int, float64) {
+	w.join.Run(block, w.graph)
+	return w.publish(block, out)
+}
+
+// publish makes the block's matrix out's only island.
+func (w *wholeBlock) publish(block *model.Block, out *model.IslandTopology) (int, int, float64) {
+	n := len(block.Transactions)
+	matrix, width := w.graph.Matrix(uint32(n))
+	out.SetWholeBlock(w.identity[:n], matrix, width)
+	return 1, n, float64(n)
 }

@@ -34,11 +34,14 @@ type sizeBand struct {
 
 // SizeBands weights generation toward the real traces' blind spots (0–100,
 // 200–1000, 1200–2000); ~150 (Ethereum) and ~1180 (Solana) keep a token
-// presence. The 1200–2000 band stays sparse because it dominates run time.
+// presence. 500–1000 is the densest band (since 2026-10-13, for tuning the
+// dense fallback's block-size threshold). The 1200–2000 band stays sparse
+// because it dominates run time.
 var SizeBands = []sizeBand{
 	{Lo: 0, Hi: 100, PerLevel: 5},
 	{Lo: 100, Hi: 200, PerLevel: 1},
-	{Lo: 200, Hi: 1000, PerLevel: 10},
+	{Lo: 200, Hi: 500, PerLevel: 4},
+	{Lo: 500, Hi: 1000, PerLevel: 16},
 	{Lo: 1000, Hi: 1200, PerLevel: 1},
 	{Lo: 1200, Hi: 2001, PerLevel: 3},
 }

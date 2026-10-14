@@ -43,20 +43,15 @@ type algorithm struct {
 }
 
 // newAlgorithms registers the timed algorithms of the main suite, each with
-// its own reusable scratch, in presentation order. NaiveSequential is not
-// timed: it is the parity reference every algorithm is checked against.
+// its own reusable scratch, in presentation order: the two strongest
+// competitors, then the two island algorithms. NaiveSequential is not timed:
+// it is the parity reference every algorithm is checked against.
 func newAlgorithms() []algorithm {
-	bitmap, bitmapIndex := model.NewConflictGraph(), model.NewInvertedIndex()
-
 	return []algorithm{
-		{"Bitmap", func(b *model.Block) (int, int, float64) {
-			competitors.BitmapConstruction(b, bitmap, bitmapIndex)
-			return 0, 0, 0
-		}, bitmap, nil, nil},
-		matrixAlgorithm("SortJoin", competitors.NewSortJoin(competitors.DefaultSortJoinConfig).Run),
-		matrixAlgorithm("HybridJoin", competitors.NewHybridJoin(competitors.DefaultHybridJoinConfig).Run),
-		islandAlgorithm("IslandLean", islands.NewIslandLean(islands.DefaultIslandConfig)),
-		islandAlgorithm("IslandLeanHub", islands.NewIslandLeanHub(islands.DefaultIslandConfig, islands.DefaultHubRule())),
+		matrixAlgorithm("BitmapTiny", competitors.NewBitmapTiny().Run),
+		matrixAlgorithm("HybridJoinTiny", competitors.NewHybridJoinTiny(competitors.DefaultHybridJoinConfig).Run),
+		islandAlgorithm("IslandHub", islands.NewIslandHub(islands.DefaultIslandHubConfig)),
+		islandAlgorithm("IslandBipartite", islands.NewIslandBipartite(islands.DefaultIslandBipartiteConfig)),
 	}
 }
 

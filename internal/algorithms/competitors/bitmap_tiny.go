@@ -5,6 +5,28 @@ import (
 	"conflict-graph-benchmarks/internal/model"
 )
 
+// BitmapTiny is Bitmap with TinyBitmap for blocks of at most TinyBitmapMax
+// transactions: the fairness counterpart of the island family's tiny-block
+// path (islands.HubConfig.TinyMax).
+type BitmapTiny struct {
+	tiny  TinyBitmap
+	index *model.ObjectInvertedIndex
+}
+
+// NewBitmapTiny returns a BitmapTiny; it is reusable scratch.
+func NewBitmapTiny() *BitmapTiny {
+	return &BitmapTiny{index: model.NewInvertedIndex()}
+}
+
+// Run builds the block's full matrix into graph.
+func (b *BitmapTiny) Run(block *model.Block, graph *model.ConflictGraph) {
+	if len(block.Transactions) <= TinyBitmapMax {
+		b.tiny.Run(block, graph)
+		return
+	}
+	BitmapConstruction(block, graph, b.index)
+}
+
 // BitmapSequentialMax is the block size at or below which Bitmap sweeps its
 // rows inline, because starting workers costs more than it saves.
 const BitmapSequentialMax uint32 = 518

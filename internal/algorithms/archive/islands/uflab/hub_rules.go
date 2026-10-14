@@ -1,3 +1,5 @@
+//go:build ignore
+
 // Package uflab holds the experimental parts of the Union-Find proving ground
 // (`go run . -suite=uf`, registry in ufarena.go): hub rules that compete with
 // islands.PrefixHubs inside islands.IslandLeanHub. New island heuristics are

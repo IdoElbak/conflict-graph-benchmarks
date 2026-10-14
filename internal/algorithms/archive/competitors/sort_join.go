@@ -1,3 +1,5 @@
+//go:build ignore
+
 package competitors
 
 import (
@@ -80,21 +82,6 @@ func (j *SortJoin) emit(graph *model.ConflictGraph, lo, hi int) {
 			continue
 		}
 		emitPairs(graph, writers, l.readers(s))
-	}
-}
-
-// emitPairs sets both bits of every writer × writer and writer × reader edge
-// of one object, each pair once (the sets are disjoint and ascending).
-func emitPairs(graph *model.ConflictGraph, writers, readers []uint32) {
-	for a, w := range writers {
-		for _, p := range writers[a+1:] {
-			graph.AddEdge(w, p)
-			graph.AddEdge(p, w)
-		}
-		for _, p := range readers {
-			graph.AddEdge(w, p)
-			graph.AddEdge(p, w)
-		}
 	}
 }
 

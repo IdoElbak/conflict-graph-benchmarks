@@ -11,7 +11,7 @@ import (
 )
 
 // Windows measurement platform. Two problems were measured on the development
-// laptop (Intel Core Ultra 7 255H, see ANOMALIES.md):
+// laptop (Intel Core Ultra 7 255H, see optimization_log/2_equalized_baselines/ANOMALIES.md):
 //   - Go's monotonic clock on Windows advances once per timer interrupt
 //     (~1 ms), so µs-scale timings are quantized; QueryPerformanceCounter is not.
 //   - On a hybrid CPU, Windows power throttling (EcoQoS) moves a background

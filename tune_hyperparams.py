@@ -1,4 +1,4 @@
-"""Short hyperparameter tuning pass for the row algorithm Bitmap (IDBucket was
+"""Short hyperparameter tuning pass for Bitmap's knobs, timed as BitmapTiny (IDBucket was
 archived 2026-10-11).
 
 One command, resumable, re-runnable on other hardware:
@@ -7,12 +7,12 @@ One command, resumable, re-runnable on other hardware:
     python tune_hyperparams.py --report   print the choices from saved results
     python tune_hyperparams.py --check    verify every knob regex matches its source once
 
-The island algorithms (IslandLean, IslandLeanHub) are not tuned here: their
+The island algorithms (IslandHub, IslandBipartite) are not tuned here: their
 knobs are a run-time config, so the proving ground times their settings side
 by side in one run (`go run . -suite=uf`, registry in ufarena.go).
 
 Each run rewrites the knob literals in the Go sources, runs
-`go run . -algs=Bitmap` (all six traces, parity-verified against
+`go run . -algs=BitmapTiny` (all six traces, parity-verified against
 NaiveSequential) and stores every per-block time plus the run's [Platform]
 line in tuning_results.json.
 
@@ -34,7 +34,7 @@ Known limitation (Phase 2, 2026-09-28): the sequential thresholds come from
 comparing different runs, and on the development laptop parallel code drifted
 ~25-35% more than sequential code between runs, biasing the thresholds
 towards "sequential". The shipped thresholds were re-measured paired (both
-modes back to back on every block in one process); see ALGORITHMS.md.
+modes back to back on every block in one process); see optimization_log/ALGORITHM_LINEAGE.md.
 """
 
 import argparse
@@ -60,7 +60,7 @@ MAX_THRESHOLD = 3000  # = model.MaximumGraphSize: "always sequential"
 # knob -> (file, regex with one capture group for the prefix)
 KNOBS = {}
 for _file, _names in {
-    "bitmap.go": ["BitmapSequentialMax", "BitmapChunkRows"],
+    "bitmap_tiny.go": ["BitmapSequentialMax", "BitmapChunkRows"],
 }.items():
     for _name in _names:
         KNOBS[_name] = (os.path.join(ALG_DIR, _file),
@@ -68,7 +68,7 @@ for _file, _names in {
 
 # Benchmark names and their knobs.
 ALGS = {
-    "Bitmap": {"seq": "BitmapSequentialMax", "chunk": "BitmapChunkRows"},
+    "BitmapTiny": {"seq": "BitmapSequentialMax", "chunk": "BitmapChunkRows"},
 }
 
 CHUNKS = [16, 64, 256]

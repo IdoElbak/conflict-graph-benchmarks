@@ -39,3 +39,6 @@ desktop.ini
 benchmark_results.json
 benchmark_results*.json
 tuning_results.json
+
+# Backups of replaced synthetic traces
+*.bak

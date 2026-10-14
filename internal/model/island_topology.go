@@ -2,17 +2,19 @@ package model
 
 import "math/bits"
 
-// IslandTopology is the output of the island algorithms (IslandLean and
-// IslandLeanHub). Together, the island graphs and the hub layer hold every
-// conflict edge of the block, each as an explicit bit:
+// IslandTopology is the output of the island algorithms (IslandHub and
+// IslandBipartite). Together, the island graphs and the hub layer hold every
+// conflict edge of the block:
 //   - Islands are disjoint groups of transactions (global indices); island i's
 //     conflicts among its members are LocalGraphs[i], a symmetric matrix of
 //     len(island) rows × LocalWidths[i] words in local coordinates (bit p of a
 //     row = Islands[i][p]).
 //   - The hub layer holds the conflicts through hub objects, which the
-//     partition ignores: a symmetric matrix of len(HubTouchers) rows ×
-//     HubWidth words over the transactions touching a hub (bit q of a row =
-//     HubTouchers[q]). An edge may appear in both parts.
+//     partition ignores. IslandHub writes it as a symmetric matrix of
+//     len(HubTouchers) rows × HubWidth words over the transactions touching a
+//     hub (bit q of a row = HubTouchers[q]), so every edge is an explicit bit;
+//     IslandBipartite as per-hub writer and reader lists (HubWriters,
+//     HubReaders). An edge may appear in both parts.
 //
 // Transactions in no island and no hub row have no conflicts. The islands can
 // be graph-colored independently; the hub layer resolves the collisions.
@@ -24,6 +26,12 @@ type IslandTopology struct {
 	HubTouchers []uint32
 	HubGraph    []uint64
 	HubWidth    uint32
+
+	// Bipartite hub layer (IslandBipartite), in place of the hub matrix: hub
+	// object h's writers HubWriters[h] and readers HubReaders[h], as global
+	// transaction ids. Each writer conflicts with every other writer and
+	// every reader of the hub.
+	HubWriters, HubReaders [][]uint32
 
 	members []uint32 // backing array of Islands
 	local   []uint64 // backing array of LocalGraphs
@@ -37,6 +45,8 @@ func (t *IslandTopology) Reset() {
 	t.HubTouchers = t.HubTouchers[:0]
 	t.HubGraph = t.HubGraph[:0]
 	t.HubWidth = 0
+	t.HubWriters = t.HubWriters[:0]
+	t.HubReaders = t.HubReaders[:0]
 }
 
 // GroupIslands records every set of two or more of the forest's n
@@ -61,6 +71,17 @@ func (t *IslandTopology) GroupIslands(f *IslandForest, n uint32) (inIslands, lar
 		largest = max(largest, pos-start)
 	}
 	return pos, largest
+}
+
+// SetWholeBlock makes the topology a single island of the block's n
+// transactions in index order (members must be 0..n-1) whose local graph is
+// matrix, n rows of width words: the output of an island algorithm that built
+// the block as one matrix. It keeps no hub layer.
+func (t *IslandTopology) SetWholeBlock(members []uint32, matrix []uint64, width uint32) {
+	t.Reset()
+	t.Islands = append(t.Islands, members)
+	t.LocalGraphs = append(t.LocalGraphs, matrix)
+	t.LocalWidths = append(t.LocalWidths, width)
 }
 
 // CarveLocalGraphs cuts one local matrix per island out of the topology's
@@ -91,6 +112,24 @@ func (t *IslandTopology) Reconstruct(graph *ConflictGraph) {
 	}
 	if len(t.HubTouchers) > 0 {
 		addMatrixEdges(graph, t.HubTouchers, t.HubGraph, t.HubWidth)
+	}
+	for h, writers := range t.HubWriters {
+		addHubEdges(graph, writers, t.HubReaders[h])
+	}
+}
+
+// addHubEdges adds the edges of one bipartite hub: every writer with every
+// other writer and every reader (a transaction never conflicts with itself).
+func addHubEdges(graph *ConflictGraph, writers, readers []uint32) {
+	for i, w := range writers {
+		for _, peers := range [][]uint32{writers[i+1:], readers} {
+			for _, p := range peers {
+				if p != w {
+					graph.AddEdge(w, p)
+					graph.AddEdge(p, w)
+				}
+			}
+		}
 	}
 }
 
@@ -172,6 +211,11 @@ func (f *IslandForest) Find(x uint32) uint32 {
 		x = parent[x]
 	}
 	return x
+}
+
+// Size returns the number of transactions in the set of root.
+func (f *IslandForest) Size(root uint32) uint32 {
+	return f.size[root]
 }
 
 // Link merges the sets of the distinct roots a and b and returns the new root.

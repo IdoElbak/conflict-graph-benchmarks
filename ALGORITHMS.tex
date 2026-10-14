@@ -1,0 +1,252 @@
+% Pseudo-code of the four algorithms of the main suite (go run .).
+% Build: latexmk -pdf ALGORITHMS.tex   (or pdflatex twice)
+% The pseudo-code of every algorithm ever tried, live and archived, is in
+% optimization_log/ALGORITHM_LINEAGE.md.
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{algorithm}
+\usepackage[noend]{algpseudocode}
+\usepackage{booktabs,tabularx}
+\usepackage[hidelinks]{hyperref}
+
+\algrenewcommand\algorithmicrequire{\textbf{Input:}}
+\algrenewcommand\algorithmicensure{\textbf{Output:}}
+\newcommand{\W}{\mathit{W}}
+\newcommand{\R}{\mathit{R}}
+\newcommand{\words}{\lceil n/64 \rceil}
+\newcommand{\bit}[1]{\mathbf{1}_{#1}}
+
+\title{Conflict-Graph Construction: the Four Algorithms of the Main Suite}
+\author{Ido Elbak}
+\date{October 2026}
+
+\begin{document}
+\maketitle
+
+\section*{Problem and notation}
+
+A block is a sequence of transactions $T_0,\dots,T_{n-1}$. Transaction $t$ has a write set
+$\W(t)$ and a read set $\R(t)$ over objects with dense integer IDs. The conflict graph has an
+edge $\{i,j\}$ iff $\W(i)\cap\W(j)\neq\emptyset$, $\W(i)\cap\R(j)\neq\emptyset$ or
+$\R(i)\cap\W(j)\neq\emptyset$; read-read sharing is no edge. Every algorithm's output is checked
+bit for bit against the all-pairs reference on every block of every run.
+
+A \emph{row} is a bitset over the block's transactions, $\words$ 64-bit words wide; $\bit{t}$ is the
+bitset holding only $t$. An object is \emph{shared} when it is written and a second transaction
+touches it. Only shared objects can produce an edge: a read of a never-written object conflicts
+with nobody, and neither does a written object no other transaction touches. Every algorithm
+applies this filter, allocates nothing per call (all scratch is reused) and sizes its rows to the
+live block. The parallel paths use one shared worker pool (\textsc{ParallelFor}: workers claim
+chunks through one atomic counter).
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}l l X@{}}
+\toprule
+Algorithm & Output & Idea \\
+\midrule
+BitmapTiny     & full $n\times n$ matrix & the baseline: per-object bitsets, ORed word-wide into each row \\
+HybridJoinTiny & full $n\times n$ matrix & the strongest competitor: sort-based join, per object the cheaper of pair bits and row ORs \\
+IslandHub      & island graphs + hub matrix & ours: Union-Find islands without the hub objects; hubs as a bit-matrix over their touchers \\
+IslandBipartite & island graphs + hub lists & ours: as IslandHub, hubs as per-hub writer and reader lists \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section{The one-word kernel (shared by all four)}
+
+For blocks of at most 64 transactions every row is one word. There the shared-object filter costs
+more than the ORs it saves, and it is not needed for correctness: a private object's bits are the
+transaction's own (cleared with the self bit), and a never-written object has no writer bits.
+
+\begin{algorithm}[H]
+\caption{TinyBitmap$(T_0..T_{n-1})$, $n\le 64$}
+\begin{algorithmic}[1]
+\Require per object $o$: one-word bitsets $w[o], r[o]$, all zero
+\For{$t \gets 0$ \textbf{to} $n-1$}
+  \For{$o \in \W(t)$} $w[o] \gets w[o] \lor \bit{t}$ \EndFor
+  \For{$o \in \R(t)$} $r[o] \gets r[o] \lor \bit{t}$ \EndFor
+\EndFor
+\For{$t \gets 0$ \textbf{to} $n-1$}
+  \State $row_t \gets \bigvee_{o\in\W(t)} (w[o]\lor r[o]) \ \lor\ \bigvee_{o\in\R(t)} w[o]$
+  \State $row_t \gets row_t \land \lnot\bit{t}$
+\EndFor
+\State zero $w, r$ (word-wide if objects $\le 16n$, else access by access)
+\end{algorithmic}
+\end{algorithm}
+
+\section{BitmapTiny (the baseline)}
+
+\begin{algorithm}[H]
+\caption{BitmapTiny$(T)$}
+\begin{algorithmic}[1]
+\If{$n \le 64$} \Return TinyBitmap$(T)$ \EndIf
+\Statex \textit{Index: per object, writer and reader bitsets $W[o], R[o]$ of $\words$ words, and a state}
+\For{$t$, $o \in \W(t)$}
+  \State $state[o] \gets t+1$ if $state[o]=0$, else mark $o$ shared; \quad $W[o] \gets W[o]\lor\bit{t}$
+\EndFor
+\For{$t$, $o \in \R(t)$ with $state[o]\neq 0$}
+  \State mark $o$ shared; \quad $R[o] \gets R[o]\lor\bit{t}$
+\EndFor
+\Statex \textit{Sweep, straight into the output rows (inline up to 518 transactions, else \textsc{ParallelFor}, 16 rows per chunk)}
+\For{$t \gets 0$ \textbf{to} $n-1$}
+  \State $row_t \gets \bigvee_{o\in\W(t),\ o \text{ shared}} (W[o]\lor R[o]) \ \lor \bigvee_{o\in\R(t),\ o\text{ shared}} W[o]$
+  \State clear bit $t$ of $row_t$
+\EndFor
+\State zero exactly the words and states the index set \Comment{$O(\text{accesses})$}
+\end{algorithmic}
+\end{algorithm}
+
+Both triangles are produced directly and every row is overwritten, so the output needs no
+clearing. The cost is one $\words$-word OR per shared access.
+
+\section{HybridJoinTiny (the strongest competitor)}
+
+The database sort-based conflict join, with SpGEMM's choice of a sparse or a dense accumulator
+made per object. Sequential.
+
+\begin{algorithm}[H]
+\caption{HybridJoinTiny$(T)$}
+\begin{algorithmic}[1]
+\If{$n \le 64$} \Return TinyBitmap$(T)$ \EndIf
+\If{$\words < 4$} \Return Bitmap$(T)$ \Comment{BitmapTiny's path for $n > 64$} \EndIf
+\State group the accesses by object (counting sort): writers $w(o)$, then readers $r(o)$ of written
+       objects, each in ascending transaction order
+\State clear the output matrix
+\For{each object $o$ with $|w(o)|\ge 1$ and $|w(o)|+|r(o)|\ge 2$}
+  \State $pairs \gets |w|(|w|-1) + 2|w||r|$
+  \If{$pairs \le (|w|+|r|)\cdot\words$} \Comment{cold object}
+    \State for every writer pair and writer--reader pair $\{a,b\}$: set bit $b$ of $row_a$ and bit $a$ of $row_b$
+  \Else \Comment{hot object}
+    \State $A \gets W \gets \bigvee_{a\in w}\bit{a}$; \quad $A \gets A \lor \bigvee_{b\in r}\bit{b}$ \Comment{two scratch rows, L1-resident}
+    \For{$a \in w$} $row_a \gets row_a \lor A$; clear bit $a$ \EndFor
+    \For{$b \in r$} $row_b \gets row_b \lor W$ \EndFor
+    \State zero $W, A$
+  \EndIf
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+Per object the cost is $\min(\text{pair bits},\ \text{accessors}\cdot\words)$: cold objects cost
+their pairs, hot objects are swept word-wide as in Bitmap but from two scratch rows instead of an
+index of $\text{objects}\times\words$ words.
+
+\section{IslandHub and IslandBipartite (the Union-Find family)}
+
+One algorithm with two hub layers; the knobs and everything else are identical.
+
+\paragraph{Output (\texttt{model.IslandTopology}).} The \emph{islands}: groups of at least two
+transactions, each with its own symmetric conflict matrix in local coordinates ($k$ members,
+$\lceil k/64\rceil$-word rows). Islands do not conflict with each other except through hub
+objects, so they can be colored in parallel. The \emph{hub layer} holds the conflicts through hub
+objects: IslandHub as a bit-matrix over the transactions touching a hub; IslandBipartite as, per
+hub, its writer list and its reader list (each writer conflicts with every other writer and every
+reader of the hub). The union of the two parts is the conflict graph. Transactions in neither part
+have no conflicts.
+
+\paragraph{The partition.} Per object an \emph{anchor}: 0 if not written yet, else (root of its
+first writer)\,+\,1, a \emph{shared} flag once a second transaction touches it, or a hub number.
+The union-find forest uses union by size, path halving, and a circular \emph{next} list per set, so
+the members of an island are read off without a Find per transaction and without a sort.
+
+\begin{algorithm}[H]
+\caption{Partition$(T, \text{hubs})$}
+\begin{algorithmic}[1]
+\For{$t \gets 0$ \textbf{to} $n-1$} \Comment{writer pass}
+  \State $root \gets t$
+  \For{$o\in\W(t)$}
+    \If{$anchor[o]=0$} $anchor[o]\gets root+1$ \Comment{first writer}
+    \ElsIf{$o$ is a hub} record $(t, o)$ as a hub write \Comment{unions nothing}
+    \Else\ mark $o$ shared; \ $root \gets$ Union$(root$, Find$(anchor[o]-1))$
+    \EndIf
+  \EndFor
+\EndFor
+\For{$t \gets 0$ \textbf{to} $n-1$} \Comment{reader pass}
+  \For{$o\in\R(t)$ with $anchor[o]\neq 0$} \Comment{never-written objects are skipped}
+    \If{$o$ is a hub} record $(t,o)$ as a hub read
+    \Else\ mark $o$ shared; \ Union(Find$(t)$, Find$(anchor[o]-1))$ \Comment{$t$'s root looked up once}
+    \EndIf
+  \EndFor
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{IslandHub$(T)$ / IslandBipartite$(T)$}
+\begin{algorithmic}[1]
+\If{$n \le 64$ \textbf{and} $\sum_t(|\W(t)|+|\R(t)|) - \#\text{objects} \ge \lceil 0.5\,n\rceil$}
+  \State \Return TinyBitmap$(T)$ as one island \Comment{tiny block with repeated objects}
+\EndIf
+\State $\text{hubs} \gets \emptyset$
+\If{$n \ge 64$}
+  \State $\text{hubs} \gets$ objects written by $\ge 3$ of $T_0..T_{63}$ \Comment{prefix hub rule}
+  \If{$n \ge 512$ \textbf{and} $\ge 32$ of $T_0..T_{63}$ write a hub}
+    \State \Return HybridJoin$(T)$ as one island \Comment{dense block: one island would hold most of it}
+  \EndIf
+\EndIf
+\State Partition$(T, \text{hubs})$; collect the islands (sets of $\ge 2$ members)
+\For{each island $I$, $k=|I|$} \Comment{inline, or one \textsc{ParallelFor} pass when the work is large}
+  \If{$k = 2$} one edge \Comment{the union implies a direct conflict}
+  \ElsIf{$k \le 4$} check every pair directly
+  \Else
+    \State compact the members' accesses of shared non-hub objects (branch-free)
+    \If{$k \le 64$} the one-word kernel on them \Comment{TinyBitmap in local coordinates}
+    \ElsIf{$k \ge 0.3\,n$} HybridJoin's per-object kernel on them \Comment{giant island}
+    \Else\ BitmapTiny's index, sweep and wipe with $\lceil k/64\rceil$-word rows
+    \EndIf
+  \EndIf
+\EndFor
+\State build the hub layer (Algorithm~\ref{alg:hubs})
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{The two hub layers}\label{alg:hubs}
+\begin{algorithmic}[1]
+\Statex \textbf{IslandHub} (bit-matrix): number the touchers $q$ in first-hub-access order
+\State per hub $h$: bitsets $W_h, R_h$ over the touchers
+\If{some hub is written by every toucher} \Comment{e.g.\ Ethereum's fee recipient}
+  \State every row $\gets$ all ones except the own bit
+\Else
+  \For{each toucher $q$} $row_q \gets \bigvee_{h \text{ written by } q}(W_h\lor R_h)\ \lor \bigvee_{h \text{ read by } q} W_h$; clear bit $q$ \EndFor
+\EndIf
+\Statex \textbf{IslandBipartite} (lists): counting-sort the recorded hub accesses by hub
+\State $\text{HubWriters}[h] \gets$ writers of $h$, $\text{HubReaders}[h] \gets$ readers of $h$, ascending
+\end{algorithmic}
+\end{algorithm}
+
+IslandBipartite pays one list entry per hub access instead of a clique among a hub's touchers,
+but it changes the output contract of the hub layer: the conflicts through a hub are implied by its
+lists rather than stored as edges.
+
+\section*{Knobs (defaults)}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}l l X@{}}
+\toprule
+Knob & Value & Meaning \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{Competitors}} \\
+\texttt{BitmapSequentialMax}, \texttt{BitmapChunkRows} & 518, 16 & Bitmap inline up to this size; rows per parallel chunk \\
+\texttt{HybridJoinConfig} & MinWords 4, DenseFactor 1 & narrower rows run Bitmap; the hot-object test \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{Island algorithms (\texttt{HubConfig})}} \\
+\texttt{PrefixTxns}, \texttt{PrefixMinWrites} & 64, 3 & hub = written by $\ge 3$ of the first 64 transactions \\
+\texttt{HubMinTxns} & 64 & smaller blocks have no hubs \\
+\texttt{TinyMax}, \texttt{TinyMinRepeats} & 64, 0.5 & the tiny path \\
+\texttt{DenseMinTxns}, \texttt{DenseHubShare} & 512, 0.5 & the dense fallback \\
+\texttt{HubRowsPerUnit} & 64 & hub-matrix rows per parallel unit \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{Island core (\texttt{IslandConfig})}} \\
+\texttt{PairwiseMax} & 4 & islands of 3--4 members are checked pairwise \\
+\texttt{GiantShare}, \texttt{JoinDense} & 0.3, 1 & giant islands take HybridJoin's kernel; its hot-object factor \\
+\texttt{SequentialMax}, \texttt{ParallelWords} & 300, 8000 & parallel only above 300 transactions and 8000 words of island matrices \\
+\texttt{SplitRows}, \texttt{GroupTxns} & 16, 256 & parallel units: rows of a wide island; members of grouped small islands \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\end{document}

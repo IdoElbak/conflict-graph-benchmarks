@@ -195,7 +195,7 @@ const (
 // interrupt or a core migration, and, because each round runs on scratch
 // memory placed elsewhere, it also averages out the placement: one instance's
 // placement biases its small-block times by up to ±15% for the whole run
-// (PHASE3_RESULTS.md §4).
+// (optimization_log/4_competitors/PHASE3_RESULTS.md §4).
 func timeAlgorithm(copies []func()) time.Duration {
 	start := nowNanos()
 	copies[0]()

@@ -3,8 +3,9 @@
 Tables (the text twin of plot_metrics.py):
   1. overview   - one row per trace, all six (Sui shown empty until its trace
                   exists): size range, median density, median time per
-                  algorithm, median per-block speedup vs Bitmap.
-  2. per trace  - median / mean / p95 per algorithm and win rate vs Bitmap.
+                  algorithm, median per-block speedup vs the baseline
+                  (HybridJoinTiny, the strongest competitor).
+  2. per trace  - median / mean / p95 per algorithm and win rate vs the baseline.
   3. structure  - density, conflicted-txn ratio and island statistics.
   4. contention - synthetic traces only: median time per size band x density
                   level, so the point where each algorithm's curve bends shows.
@@ -32,7 +33,7 @@ TRACES = [
     ("TPC", "TPC-C style (synthetic)"),
 ]
 SYNTHETIC = ("YCSB", "TPC")
-BASELINE = "Bitmap"
+BASELINE = "HybridJoinTiny"
 # Must match digestion.DensityLevels.
 DENSITY_LEVELS = [0.001, 0.003, 0.01, 0.03, 0.1, 0.2, 0.4, 0.6, 0.8]
 SIZE_BANDS = [(0, 200), (200, 1000), (1000, 2001)]
@@ -86,7 +87,7 @@ def times(blocks, alg):
 
 
 def speedup(blocks, alg):
-    """Median per-block Bitmap/alg ratio and win count (blocks timed at 0 are skipped)."""
+    """Median per-block baseline/alg ratio and win count (blocks timed at 0 are skipped)."""
     ratios, wins = [], 0
     for b in blocks:
         if alg not in b["times"] or BASELINE not in b["times"]:
@@ -109,7 +110,7 @@ def nearest_level(density):
 
 def print_overview(by_trace, algs):
     others = [a for a in algs if a != BASELINE]
-    print("\n=== 1. Overview (ms: median over blocks of each block's per-call time; speedup = median per-block Bitmap/alg) ===")
+    print(f"\n=== 1. Overview (ms: median over blocks of each block's per-call time; speedup = median per-block {BASELINE}/alg) ===")
     header = f"{'Trace':<27}{'blocks':>7}{'txns':>11}{'med dens':>10}"
     header += "".join(f"{short_name(a) + ' ms':>13}" for a in algs)
     header += "".join(f"{short_name(a) + ' x':>12}" for a in others)
@@ -131,7 +132,7 @@ def print_overview(by_trace, algs):
 
 
 def print_per_trace(by_trace, algs):
-    print("\n=== 2. Per trace: median / mean / p95 (ms), win rate vs Bitmap ===")
+    print(f"\n=== 2. Per trace: median / mean / p95 (ms), win rate vs {BASELINE} ===")
     for label, title in TRACES:
         blocks = by_trace.get(label, [])
         if not blocks:
@@ -150,7 +151,7 @@ def print_per_trace(by_trace, algs):
 
 
 def print_structure(by_trace):
-    print("\n=== 3. Structure: density, conflicted-txn ratio, islands (IslandLean) ===")
+    print("\n=== 3. Structure: density, conflicted-txn ratio, islands (IslandHub) ===")
     print(f"{'Trace':<27}{'density min/med/mean/p95/max':>36}{'<10%':>7}{'conflicted med/p95':>20}"
           f"{'med objs':>10}{'med isl':>9}{'largest/n':>11}")
     for label, title in TRACES:
@@ -160,7 +161,7 @@ def print_structure(by_trace):
             continue
         dens = sorted(b["density"] for b in blocks)
         conf = sorted(b.get("conflicted_txns_ratio", float("nan")) for b in blocks)
-        isl = [b.get("island_metrics", {}).get("IslandLean") for b in blocks]
+        isl = [b.get("island_metrics", {}).get("IslandHub") for b in blocks]
         counts = [i["count"] if i else 0 for i in isl]
         shares = [i["max_size"] / b["num_txns"] for i, b in zip(isl, blocks) if i and b["num_txns"]]
         dens_txt = (f"{dens[0]:.4f}/{statistics.median(dens):.4f}/{statistics.fmean(dens):.4f}/"

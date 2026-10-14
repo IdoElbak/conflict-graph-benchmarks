@@ -8,7 +8,6 @@ import (
 	"conflict-graph-benchmarks/internal/algorithms"
 	"conflict-graph-benchmarks/internal/algorithms/competitors"
 	"conflict-graph-benchmarks/internal/algorithms/islands"
-	"conflict-graph-benchmarks/internal/algorithms/islands/uflab"
 	"conflict-graph-benchmarks/internal/model"
 )
 
@@ -45,45 +44,50 @@ func randomBlock(rng *rand.Rand, n, numObjects int, feeHub bool) *model.Block {
 
 // TestAlgorithmsMatchNaiveSequential checks every timed algorithm bit for bit
 // against the definitional reference on seeded random blocks, along with the
-// island algorithms' parallel path forced on every block and every hub rule
-// of the proving ground (the complete hub matrix included).
+// island algorithms with each of their paths forced on every block it can
+// take: parallel build, pairwise islands, many hubs (the complete hub matrix
+// included), the giant-island kernel with every object as pairs and as rows,
+// the tiny path and the dense fallback.
 func TestAlgorithmsMatchNaiveSequential(t *testing.T) {
-	parallel := islands.DefaultIslandConfig
-	parallel.SequentialMax, parallel.ParallelWords = 0, 0
-	pairwise := islands.DefaultIslandConfig
-	pairwise.PairwiseMax = 16
-	islandJoin, islandJoinParallel, islandJoinPairs, islandJoinDense := islands.DefaultIslandConfig, parallel, islands.DefaultIslandConfig, parallel
-	islandJoin.JoinDense, islandJoinParallel.JoinDense, islandJoinPairs.JoinDense, islandJoinDense.JoinDense = 1, 1, 1e9, 1e-9
-	islandJoinMixed := islandJoinParallel
-	islandJoinMixed.JoinMinWidth = 3 // islands of 65..128 members keep the Bitmap-style kernel
-	islands := []struct {
-		name    string
-		variant interface {
-			Run(*model.Block) (int, int, float64)
-			Topology() *model.IslandTopology
-		}
+	type islandVariant interface {
+		Run(*model.Block) (int, int, float64)
+		Topology() *model.IslandTopology
+	}
+	manyHubs := func(c *islands.HubConfig) { c.PrefixTxns, c.PrefixMinWrites = 16, 2 }
+	forceParallel := func(c *islands.HubConfig) { c.Island.SequentialMax, c.Island.ParallelWords = 0, 0 }
+	cases := []struct {
+		name   string
+		change func(*islands.HubConfig)
 	}{
-		{"IslandLean", islands.NewIslandLean(islands.DefaultIslandConfig)},
-		{"IslandLeanHub", islands.NewIslandLeanHub(islands.DefaultIslandConfig, islands.DefaultHubRule())},
-		{"IslandLean parallel", islands.NewIslandLean(parallel)},
-		{"IslandLean pairwise 16", islands.NewIslandLean(pairwise)},
-		{"prefix hubs parallel", islands.NewIslandLeanHub(parallel, &islands.PrefixHubs{Txns: 16, MinWrites: 4})},
-		{"writers hubs", islands.NewIslandLeanHub(islands.DefaultIslandConfig, &uflab.CountedHubs{Count: uflab.Writers, Threshold: 3})},
-		{"weighted hubs", islands.NewIslandLeanHub(pairwise, &uflab.CountedHubs{Count: uflab.Weighted, Threshold: 12, WriteWeight: 4})},
-		{"split hubs parallel", islands.NewIslandLeanHub(parallel, &uflab.CountedHubs{Count: uflab.Split, Threshold: 3, ReadThreshold: 6})},
-		{"IslandLean join", islands.NewIslandLean(islandJoin)},
-		{"IslandLean join parallel", islands.NewIslandLean(islandJoinParallel)},
-		{"IslandLeanHub join mixed parallel", islands.NewIslandLeanHub(islandJoinMixed, &islands.PrefixHubs{Txns: 16, MinWrites: 4})},
-		{"IslandLean join all pairs", islands.NewIslandLean(islandJoinPairs)},
-		{"IslandLeanHub join all dense parallel", islands.NewIslandLeanHub(islandJoinDense, islands.DefaultHubRule())},
-		{"IslandLeanHub join", islands.NewIslandLeanHub(islandJoin, islands.DefaultHubRule())},
-		{"sampled hubs", islands.NewIslandLeanHub(islands.DefaultIslandConfig, &uflab.CountedHubs{Count: uflab.Sampled, Threshold: 4, SampleEvery: 2})},
+		{"default", func(*islands.HubConfig) {}},
+		{"parallel", forceParallel},
+		{"pairwise 16", func(c *islands.HubConfig) { c.Island.PairwiseMax = 16 }},
+		{"many hubs parallel", func(c *islands.HubConfig) { manyHubs(c); forceParallel(c) }},
+		{"strided prefix, hub rows 8", func(c *islands.HubConfig) { c.PrefixStrided, c.HubRowsPerUnit = true, 8; manyHubs(c); forceParallel(c) }},
+		{"no hubs", func(c *islands.HubConfig) { c.PrefixMinWrites = 1 << 20 }},
+		{"no giant kernel", func(c *islands.HubConfig) { c.Island.GiantShare = 0 }},
+		{"giant pairs", func(c *islands.HubConfig) { c.Island.GiantShare, c.Island.JoinDense = 0.01, 1e9 }},
+		{"giant rows parallel", func(c *islands.HubConfig) { c.Island.GiantShare, c.Island.JoinDense = 0.01, 1e-9; forceParallel(c) }},
+		{"always tiny", func(c *islands.HubConfig) { c.TinyMinRepeats = 0 }},
+		{"no tiny", func(c *islands.HubConfig) { c.TinyMax = 0 }},
+		{"all dense", func(c *islands.HubConfig) { c.TinyMax, c.DenseHubShare, c.DenseMinTxns = 32, 1e-9, 0 }},
+		{"dense share 0.3 many hubs", func(c *islands.HubConfig) { c.DenseHubShare, c.DenseMinTxns = 0.3, 100; manyHubs(c) }},
+	}
+	type islandCase struct {
+		name    string
+		variant islandVariant
+	}
+	var islandCases []islandCase
+	for _, c := range cases {
+		cfg := islands.DefaultIslandHubConfig
+		c.change(&cfg)
+		islandCases = append(islandCases,
+			islandCase{"IslandHub " + c.name, islands.NewIslandHub(cfg)},
+			islandCase{"IslandBipartite " + c.name, islands.NewIslandBipartite(cfg)})
 	}
 
-	// The competitors: defaults, SortJoin's parallel path forced, and
-	// HybridJoin on narrow blocks too, with every object as pairs and as dense.
-	joinParallel := competitors.DefaultSortJoinConfig
-	joinParallel.SequentialMax = 0
+	// The competitors, with HybridJoin on narrow blocks too, and with every
+	// object as pairs and as dense.
 	hybridJoin := competitors.HybridJoinConfig{MinWords: 1, DenseFactor: 1}
 	joinLists, joinDense := hybridJoin, hybridJoin
 	joinLists.DenseFactor, joinDense.DenseFactor = 1e9, 0
@@ -91,20 +95,23 @@ func TestAlgorithmsMatchNaiveSequential(t *testing.T) {
 		name string
 		run  func(*model.Block, *model.ConflictGraph)
 	}{
-		{"SortJoin", competitors.NewSortJoin(competitors.DefaultSortJoinConfig).Run},
-		{"SortJoin parallel", competitors.NewSortJoin(joinParallel).Run},
 		{"HybridJoin", competitors.NewHybridJoin(competitors.DefaultHybridJoinConfig).Run},
 		{"HybridJoin narrow", competitors.NewHybridJoin(hybridJoin).Run},
 		{"HybridJoin all pairs", competitors.NewHybridJoin(joinLists).Run},
 		{"HybridJoin all dense", competitors.NewHybridJoin(joinDense).Run},
+		{"BitmapTiny", competitors.NewBitmapTiny().Run},
+		{"HybridJoinTiny", competitors.NewHybridJoinTiny(competitors.DefaultHybridJoinConfig).Run},
 	}
 
 	want, got := model.NewConflictGraph(), model.NewConflictGraph()
 	index := model.NewInvertedIndex()
 	rng := rand.New(rand.NewPCG(4, 2026))
-	for blockIdx := range 80 {
+	for blockIdx := range 81 {
 		n := 1 + rng.IntN(500)
-		block := randomBlock(rng, n, 1+rng.IntN(3*n), blockIdx%5 == 0)
+		if blockIdx == 80 {
+			n = 0 // an empty block, as the Sui trace has
+		}
+		block := randomBlock(rng, n, 1+rng.IntN(max(1, 3*n)), blockIdx%5 == 0)
 		size := uint32(n)
 		algorithms.NaiveSequential(block, want)
 		check := func(name string) {
@@ -121,7 +128,7 @@ func TestAlgorithmsMatchNaiveSequential(t *testing.T) {
 			m.run(block, got)
 			check(m.name)
 		}
-		for _, island := range islands {
+		for _, island := range islandCases {
 			island.variant.Run(block)
 			got.Reset(size)
 			island.variant.Topology().Reconstruct(got)
